@@ -9,6 +9,8 @@ import {
   createUsageLoader,
   fetchAnthropic,
   fetchCodex,
+  fetchKimi,
+  fetchXai,
   getJson,
   line,
   pie,
@@ -164,6 +166,56 @@ test("Codex derives window labels, omits absent plan, and keeps one expiry per r
     assert.match(lines.join("\n"), /Session \(90m\)/);
     assert.match(lines.join("\n"), /Session \(1d\)/);
     assert.match(lines.join("\n"), /●● use by: 11 Aug, 11 Aug/);
+  });
+});
+
+test("Kimi parses bearer-auth membership and session and weekly quotas", async () => {
+  const ctx = authContext({
+    "kimi-coding": { source: "OAuth", auth: { headers: { Authorization: "Bearer kimi-token" } } },
+  });
+  await withFetch(async (url, init) => {
+    assert.equal(String(url), "https://api.kimi.com/coding/v1/usages");
+    assert.equal(init.headers.Authorization, "Bearer kimi-token");
+    return json({
+      user: { membership: { level: "LEVEL_MAX" } },
+      limits: [{
+        window: { timeUnit: "TIME_UNIT_MINUTE", duration: 90 },
+        detail: { used: 30, limit: 120, resetTime: "2030-08-11T12:00:00Z" },
+      }],
+      usage: { used: 45, limit: 300, resetTime: "2030-08-15T12:00:00Z" },
+    });
+  }, async () => {
+    const lines = await fetchKimi(ctx);
+    assert.equal(lines[0], "Kimi (max)");
+    assert.match(lines.join("\n"), /Session \(90m\).*25%/);
+    assert.match(lines.join("\n"), /Week.*15%/);
+  });
+});
+
+test("Grok parses bounded and unbounded monthly billing", async () => {
+  const ctx = authContext({ xai: oauth("grok-token") });
+  let unbounded = false;
+  await withFetch(async (url) => {
+    if (String(url).endsWith("/settings")) return json({ subscription_tier_display: "SuperGrok" });
+    assert.equal(String(url), "https://cli-chat-proxy.grok.com/v1/billing");
+    return json({
+      config: unbounded
+        ? { used: { val: 42 } }
+        : {
+            monthlyLimit: { val: 1000 },
+            used: { val: 250 },
+            billingPeriodStart: "2030-08-01T00:00:00Z",
+            billingPeriodEnd: "2030-09-01T00:00:00Z",
+          },
+    });
+  }, async () => {
+    const bounded = await fetchXai(ctx);
+    assert.equal(bounded[0], "Grok (SuperGrok)");
+    assert.match(bounded.join("\n"), /Month \(credits\).*25%/);
+
+    unbounded = true;
+    const noLimit = await fetchXai(ctx);
+    assert.match(noLimit.join("\n"), /42 used \(no limit reported\)/);
   });
 });
 
