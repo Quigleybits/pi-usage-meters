@@ -253,3 +253,10 @@ test("package manifest limits files and includes community metadata", () => {
   assert.match(pkg.repository?.url ?? "", /github\.com\/Quigleybits\/pi-usage-meters/);
   assert.equal(pkg.publishConfig?.access, "public");
 });
+
+test("publish workflow is OIDC-only", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/publish.yml", import.meta.url), "utf8");
+  assert.match(workflow, /id-token:\s*write/);
+  assert.match(workflow, /npm publish --access public --provenance/);
+  assert.doesNotMatch(workflow, /NODE_AUTH_TOKEN|NPM_TOKEN/);
+});
