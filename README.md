@@ -2,7 +2,7 @@
 
 A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're logged into via pi's OAuth** — one compact, colour-coded block instead of four dashboards.
 
-![Colour-coded usage meters for Claude, Codex, Kimi, and Grok](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/main/assets/pi-usage.png)
+![Colour-coded usage meters for Claude, Codex, Kimi, and Grok](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/69608efa843c53bd4321cf3105cdf1b99e67b801/assets/pi-usage.png)
 
 Each provider block is colour-coded on your terminal's existing background, bars fill left-to-right with usage, and the pie glyph (`○ ◔ ◑ ◕ ●`) fills as the quota window elapses toward reset. The entry renders in the transcript but never enters LLM context.
 
