@@ -107,6 +107,27 @@ test("oversized responses are rejected", async () => {
   );
 });
 
+test("chunked oversized responses are cancelled at the byte cap", async () => {
+  let chunksRead = 0;
+  let cancelled = false;
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (chunksRead === 5) return controller.close();
+      chunksRead += 1;
+      controller.enqueue(new Uint8Array(400_000));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  await withFetch(
+    async () => new Response(stream, { headers: { "content-type": "application/json" } }),
+    async () => assert.rejects(getJson("https://example.test", "token"), /response too large/),
+  );
+  assert.equal(cancelled, true);
+  assert.ok(chunksRead < 5);
+});
+
 test("Claude money honours currency exponent", async () => {
   const ctx = authContext({ anthropic: oauth() });
   await withFetch(async (url) => {

@@ -96,6 +96,28 @@ const header = (name, plan) => {
 
 const noAuth = (name, login) => [name, `  OAuth not logged in (/login ${login})`];
 
+async function readTextLimited(response) {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new Error("response too large");
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, bytes).toString("utf8");
+}
+
 export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -106,9 +128,11 @@ export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) 
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const declared = Number(res.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new Error("response too large");
-    const text = await res.text();
-    if (Buffer.byteLength(text, "utf8") > MAX_RESPONSE_BYTES) throw new Error("response too large");
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      await res.body?.cancel().catch(() => {});
+      throw new Error("response too large");
+    }
+    const text = await readTextLimited(res);
     try {
       return JSON.parse(text);
     } catch {
