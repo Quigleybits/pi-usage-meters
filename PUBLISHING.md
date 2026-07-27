@@ -72,6 +72,16 @@ The workflow grants only `contents: read` and `id-token: write`, checks out the 
 
 Search and recent-package catalogs are asynchronous. A live npm version and direct pi.dev package page are authoritative; do not republish because a search index is delayed.
 
+### Note — v0.1.0 npm search-index lag (2026-07-27)
+
+`pi-usage-meters@0.1.0` (published 2026-07-26 19:39 UTC) is live on the registry and installable, but after 24h+ it is still absent from npm's search index (`https://registry.npmjs.org/-/v1/search`) — which is exactly what pi.dev/packages queries (`?text=keywords:pi-package&size=250`, client-side). No npm incident is open; recently *updated* pi packages index within minutes, so this looks like npm's slow screening path for brand-new packages.
+
+Decision: wait 72h from publish (until **2026-07-29 ~19:40 UTC**). If still unindexed, release the next version carrying the pending 1.1 additions — a real release, not an empty index-kick republish, consistent with the rule above. Check with:
+
+```bash
+curl "https://registry.npmjs.org/-/v1/search?text=pi-usage-meters"
+```
+
 ## Failure recovery
 
 Inspect only the failed workflow steps:
