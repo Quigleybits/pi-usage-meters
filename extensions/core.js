@@ -314,9 +314,12 @@ const FETCHERS = [
 
 function safeError(error) {
   const message = String(error?.message ?? "");
-  return /^(HTTP \d{3}|timed out after \d+ms|response too large|non-JSON response)$/.test(message)
-    ? message
-    : "usage unavailable";
+  if (/^(HTTP \d{3}|timed out after \d+ms|response too large|non-JSON response)$/.test(message)) return message;
+  if (message === "fetch failed") {
+    const code = String(error?.cause?.code ?? "");
+    return /^[A-Z0-9_]{2,20}$/.test(code) ? `network error (${code})` : "network error";
+  }
+  return "usage unavailable";
 }
 
 async function fetchAll(ctx) {

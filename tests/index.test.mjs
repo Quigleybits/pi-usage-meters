@@ -228,6 +228,23 @@ test("unexpected auth errors cannot persist secret text", async () => {
   assert.match(JSON.stringify(data), /usage unavailable/);
 });
 
+test("network failures surface as network error with system code", async () => {
+  const load = createUsageLoader();
+  const ctx = authContext({
+    anthropic: oauth(),
+    "openai-codex": oauth(),
+    "kimi-coding": oauth(),
+    xai: oauth(),
+  });
+  await withFetch(async () => {
+    throw new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } });
+  }, async () => {
+    const text = JSON.stringify(await load(ctx));
+    assert.match(text, /network error \(ECONNREFUSED\)/);
+    assert.doesNotMatch(text, /usage unavailable/);
+  });
+});
+
 test("loader caches sequential calls and deduplicates concurrent calls", async () => {
   let resolutions = 0;
   const ctx = {
