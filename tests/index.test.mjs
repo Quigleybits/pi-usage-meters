@@ -228,6 +228,16 @@ test("unexpected auth errors cannot persist secret text", async () => {
   assert.match(JSON.stringify(data), /usage unavailable/);
 });
 
+test("HTTP 401 from a usage endpoint prompts re-login for that provider", async () => {
+  const load = createUsageLoader();
+  const ctx = authContext({ xai: oauth() });
+  await withFetch(async () => json({}, { status: 401 }), async () => {
+    const data = await load(ctx);
+    const grok = data.blocks.find((block) => block.name === "Grok");
+    assert.match(grok.lines.join("\n"), /OAuth token rejected \(\/login xai\)/);
+  });
+});
+
 test("network failures surface as network error with system code", async () => {
   const load = createUsageLoader();
   const ctx = authContext({

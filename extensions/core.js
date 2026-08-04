@@ -306,10 +306,10 @@ export async function fetchXai(ctx) {
 }
 
 const FETCHERS = [
-  ["Claude", fetchAnthropic],
-  ["Codex", fetchCodex],
-  ["Kimi", fetchKimi],
-  ["Grok", fetchXai],
+  ["Claude", fetchAnthropic, "anthropic"],
+  ["Codex", fetchCodex, "openai-codex"],
+  ["Kimi", fetchKimi, "kimi-coding"],
+  ["Grok", fetchXai, "xai"],
 ];
 
 function safeError(error) {
@@ -323,10 +323,13 @@ function safeError(error) {
 }
 
 async function fetchAll(ctx) {
-  return Promise.all(FETCHERS.map(async ([name, fetcher]) => {
+  return Promise.all(FETCHERS.map(async ([name, fetcher, login]) => {
     try {
       return { name, lines: await fetcher(ctx) };
     } catch (error) {
+      if (error?.message === "HTTP 401") {
+        return { name, lines: [name, `  OAuth token rejected (/login ${login})`] };
+      }
       return { name, lines: [name, plain("error", safeError(error))] };
     }
   }));
