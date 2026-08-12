@@ -192,28 +192,62 @@ test("Kimi parses bearer-auth membership and session and weekly quotas", async (
   });
 });
 
-test("Grok parses bounded and unbounded monthly billing", async () => {
+test("Grok parses weekly credits, monthly fallback, and product split", async () => {
   const ctx = authContext({ xai: oauth("grok-token") });
-  let unbounded = false;
+  let mode = "weekly";
   await withFetch(async (url) => {
-    if (String(url).endsWith("/settings")) return json({ subscription_tier_display: "SuperGrok" });
-    assert.equal(String(url), "https://cli-chat-proxy.grok.com/v1/billing");
-    return json({
-      config: unbounded
-        ? { used: { val: 42 } }
-        : {
-            monthlyLimit: { val: 1000 },
-            used: { val: 250 },
-            billingPeriodStart: "2030-08-01T00:00:00Z",
-            billingPeriodEnd: "2030-09-01T00:00:00Z",
+    const href = String(url);
+    if (href.endsWith("/settings")) return json({ subscription_tier_display: "SuperGrok" });
+    assert.equal(href, "https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+    if (mode === "weekly") {
+      return json({
+        config: {
+          currentPeriod: {
+            type: "USAGE_PERIOD_TYPE_WEEKLY",
+            start: "2030-08-05T00:00:00Z",
+            end: "2030-08-12T00:00:00Z",
           },
-    });
+          creditUsagePercent: 17,
+          isUnifiedBillingUser: true,
+          productUsage: [
+            { product: "GrokBuild", usagePercent: 10 },
+            { product: "GrokImagine", usagePercent: 6 },
+            { product: "GrokChat", usagePercent: 1 },
+          ],
+          onDemandCap: { val: 100 },
+          onDemandUsed: { val: 25 },
+          prepaidBalance: { val: 12 },
+          billingPeriodStart: "2030-08-05T00:00:00Z",
+          billingPeriodEnd: "2030-08-12T00:00:00Z",
+        },
+      });
+    }
+    if (mode === "monthly") {
+      return json({
+        config: {
+          monthlyLimit: { val: 1000 },
+          used: { val: 250 },
+          billingPeriodStart: "2030-08-01T00:00:00Z",
+          billingPeriodEnd: "2030-09-01T00:00:00Z",
+        },
+      });
+    }
+    return json({ config: { used: { val: 42 } } });
   }, async () => {
-    const bounded = await fetchXai(ctx);
-    assert.equal(bounded[0], "Grok (SuperGrok)");
-    assert.match(bounded.join("\n"), /Month \(credits\).*25%/);
+    const weekly = await fetchXai(ctx);
+    assert.equal(weekly[0], "Grok (SuperGrok)");
+    assert.match(weekly.join("\n"), /Week \(credits\).*17%/);
+    assert.match(weekly.join("\n"), /Build.*10%/);
+    assert.match(weekly.join("\n"), /Imagine.*\s+6%/);
+    assert.match(weekly.join("\n"), /Chat.*\s+1%/);
+    assert.match(weekly.join("\n"), /On-demand.*25%/);
+    assert.match(weekly.join("\n"), /Prepaid balance.*12/);
 
-    unbounded = true;
+    mode = "monthly";
+    const monthly = await fetchXai(ctx);
+    assert.match(monthly.join("\n"), /Month \(credits\).*25%/);
+
+    mode = "unbounded";
     const noLimit = await fetchXai(ctx);
     assert.match(noLimit.join("\n"), /42 used \(no limit reported\)/);
   });

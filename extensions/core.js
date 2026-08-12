@@ -284,23 +284,61 @@ export async function fetchKimi(ctx) {
   return lines;
 }
 
+function grokProductLabel(product) {
+  const raw = clean(String(product ?? "").replace(/^Grok/i, ""), 20);
+  return raw || "product";
+}
+
 export async function fetchXai(ctx) {
   const token = await tokenFor(ctx, "xai");
   if (!token) return noAuth("Grok", "xai");
+  // SuperGrok unified billing is weekly; bare /billing still returns the old monthly shape with 0s.
   const [billing, settings] = await Promise.all([
-    getJson("https://cli-chat-proxy.grok.com/v1/billing", token),
+    getJson("https://cli-chat-proxy.grok.com/v1/billing?format=credits", token),
     optionalJson("https://cli-chat-proxy.grok.com/v1/settings", token),
   ]);
   const config = billing.config ?? {};
-  const limit = Number(config.monthlyLimit?.val);
-  const used = Number(config.used?.val);
   const lines = [header("Grok", settings?.subscription_tier_display)];
-  if (Number.isFinite(limit) && limit > 0) {
-    const start = Date.parse(config.billingPeriodStart);
-    const end = Date.parse(config.billingPeriodEnd);
-    lines.push(line("Month (credits)", pct(used, limit), end, end - start));
+  const start = Date.parse(config.currentPeriod?.start ?? config.billingPeriodStart);
+  const end = Date.parse(config.currentPeriod?.end ?? config.billingPeriodEnd);
+  const periodMs = Number.isFinite(start) && Number.isFinite(end) && end > start ? end - start : D7;
+  const creditPct = Number(config.creditUsagePercent);
+  const weekly =
+    config.currentPeriod?.type === "USAGE_PERIOD_TYPE_WEEKLY"
+    || config.isUnifiedBillingUser === true
+    || Number.isFinite(creditPct);
+
+  if (weekly) {
+    lines.push(line("Week (credits)", Number.isFinite(creditPct) ? creditPct : 0, end, periodMs));
+    for (const product of (config.productUsage ?? []).slice(0, 8)) {
+      const productPct = Number(product?.usagePercent);
+      if (!Number.isFinite(productPct)) continue;
+      lines.push(line(grokProductLabel(product.product), productPct));
+    }
   } else {
-    lines.push(plain("Month (credits)", `${Number.isFinite(used) ? used.toLocaleString() : "?"} used (no limit reported)`));
+    const limit = Number(config.monthlyLimit?.val);
+    const used = Number(config.used?.val);
+    if (Number.isFinite(limit) && limit > 0) {
+      lines.push(line("Month (credits)", pct(used, limit), end, periodMs));
+    } else {
+      lines.push(plain(
+        "Month (credits)",
+        `${Number.isFinite(used) ? used.toLocaleString() : "?"} used (no limit reported)`,
+      ));
+    }
+  }
+
+  const onDemandCap = Number(config.onDemandCap?.val);
+  const onDemandUsed = Number(config.onDemandUsed?.val);
+  if (Number.isFinite(onDemandCap) && onDemandCap > 0) {
+    lines.push(line("On-demand", pct(onDemandUsed, onDemandCap)));
+  } else if (Number.isFinite(onDemandUsed) && onDemandUsed > 0) {
+    lines.push(plain("On-demand", `${onDemandUsed.toLocaleString()} used`));
+  }
+
+  const prepaid = Number(config.prepaidBalance?.val);
+  if (Number.isFinite(prepaid) && prepaid > 0) {
+    lines.push(plain("Prepaid balance", prepaid.toLocaleString()));
   }
   return lines;
 }

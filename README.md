@@ -27,7 +27,7 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 | Claude (`anthropic`) | `api.anthropic.com/api/oauth/profile` | `api.anthropic.com/api/oauth/usage` |
 | Codex (`openai-codex`) | plan from usage payload | `chatgpt.com/backend-api/wham/usage` + `.../rate-limit-reset-credits` |
 | Kimi (`kimi-coding`) | membership level from usage payload | `api.kimi.com/coding/v1/usages` |
-| Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing` |
+| Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly SuperGrok pool; monthly shape kept as fallback) |
 
 ## Privacy & security
 
@@ -43,7 +43,7 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 
 - These quota endpoints are **undocumented** and may change without notice; each provider fetch is isolated and fails soft.
 - Codex banked-reset lookup currently sends `OpenAI-Beta: codex-1` and `originator: Codex Desktop`, matching the existing Codex client endpoint contract. Review this compatibility choice if OpenAI publishes an official replacement.
-- Grok credit units are shown as reported by the billing endpoint.
+- Grok SuperGrok usage is the shared weekly credit pool (`creditUsagePercent`), with optional per-product split (Build/Chat/Imagine). Legacy monthly credit totals remain as a fallback if the weekly payload is absent.
 - The pie glyph uses `○ ◔ ◑ ◕ ●` from the Unicode Geometric Shapes block so a single font renders all states uniformly.
 - Requires a pi version with OAuth login support for the providers you use (`/login anthropic`, `/login openai-codex`, `/login kimi-coding`, `/login xai`).
 
