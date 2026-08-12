@@ -1,12 +1,26 @@
 {
   "name": "pi-usage-meters",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi extension: /usage shows subscription quota meters for OAuth-logged-in Claude, Codex, Kimi, and Grok accounts.",
-  "keywords": ["pi-package", "pi-extension", "usage", "quota", "rate-limits", "claude", "codex", "kimi", "grok"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "usage",
+    "quota",
+    "rate-limits",
+    "claude",
+    "codex",
+    "kimi",
+    "grok"
+  ],
   "license": "MIT",
   "author": "Aidan Quigley",
   "type": "module",
-  "files": ["extensions", "README.md", "LICENSE"],
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test",
     "check": "node --check extensions/core.js && node --check extensions/index.js",
@@ -27,7 +41,9 @@
     "access": "public"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-tui": "*"
