@@ -2,7 +2,7 @@
 
 A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're logged into via pi's OAuth** — one compact, colour-coded block instead of four dashboards.
 
-![Colour-coded usage meters for Claude, Codex, Kimi, and Grok](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/69608efa843c53bd4321cf3105cdf1b99e67b801/assets/pi-usage.png)
+![Colour-coded usage meters for Claude, Codex, Kimi, and Grok (synthetic fixture data)](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/main/assets/pi-usage.png)
 
 Each provider block is colour-coded on your terminal's existing background, bars fill left-to-right with usage, and the pie glyph (`○ ◔ ◑ ◕ ●`) fills as the quota window elapses toward reset. The entry renders in the transcript but never enters LLM context.
 
@@ -37,7 +37,7 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 - API responses are size-limited; untrusted strings are length-limited and stripped of terminal controls, ANSI, and bidirectional-text controls both before storage and again at render time.
 - Each provider fetch is isolated: one failure never blanks the others.
 
-**Privacy note:** `/usage` stores plan labels, quota percentages, reset times, and any displayed spend figures in the current pi session. Exporting or sharing that session includes this output. Do not share the session if those account details are sensitive.
+**Privacy note:** `/usage` stores plan labels, quota percentages, reset times, and any displayed spend figures in the current pi session. Exporting or sharing that session includes this output. Do not share the session if those account details are sensitive. The README screenshot uses synthetic fixture values, not live account data.
 
 ## Notes & caveats
 
