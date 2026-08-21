@@ -6,6 +6,35 @@ const MAX_RENDER_LINE = 300;
 const LABEL_W = 22;
 const H5 = 5 * 3600e3;
 const D7 = 7 * 86400e3;
+const RESET_DROP_PCT = 5;
+
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
+const stateFilePath = () =>
+  process.env.PI_USAGE_METERS_STATE || join(homedir(), ".pi", "agent", "usage-meters-state.json");
+
+async function readUsageState() {
+  try {
+    const parsed = JSON.parse(await readFile(stateFilePath(), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeUsageState(state) {
+  try {
+    const path = stateFilePath();
+    await mkdir(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    await writeFile(tmp, JSON.stringify(state));
+    await rename(tmp, path);
+  } catch {
+    // State persistence is best-effort; /usage must never fail because of it.
+  }
+}
 
 export const RESET = "\x1b[0m";
 export const STAMP = "\x1b[2;38;2;138;138;138m";
@@ -314,6 +343,30 @@ export async function fetchXai(ctx) {
       const productPct = Number(product?.usagePercent);
       if (!Number.isFinite(productPct)) continue;
       lines.push(line(grokProductLabel(product.product), productPct));
+    }
+
+    // Reset credits are web-session-only at xAI (ConsumerUiSvc), so the meter infers
+    // a redeemed reset: within one weekly period usage only climbs — a drop is a reset.
+    const startIso = config.currentPeriod?.start ?? config.billingPeriodStart;
+    const endIso = config.currentPeriod?.end ?? config.billingPeriodEnd;
+    if (Number.isFinite(creditPct) && startIso && endIso) {
+      const state = await readUsageState();
+      const prev = state.xai;
+      if (
+        prev?.periodStart === startIso && prev?.periodEnd === endIso
+        && Number.isFinite(Number(prev.pct)) && prev.pct - creditPct >= RESET_DROP_PCT
+      ) {
+        lines.push(plain("Reset used", `${fmtDay(Date.now())} (${Math.round(prev.pct)}% → ${Math.round(creditPct)}%)`));
+      }
+      for (const key of ["resetsRemaining", "remainingResets"]) {
+        const count = Math.trunc(Number(config[key]));
+        if (Number.isFinite(count) && count > 0) {
+          lines.push(plain("Resets", `${count} available`));
+          break;
+        }
+      }
+      state.xai = { periodStart: startIso, periodEnd: endIso, pct: creditPct, seenAt: new Date().toISOString() };
+      await writeUsageState(state);
     }
   } else {
     const limit = Number(config.monthlyLimit?.val);

@@ -27,11 +27,12 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 | Claude (`anthropic`) | `api.anthropic.com/api/oauth/profile` | `api.anthropic.com/api/oauth/usage` |
 | Codex (`openai-codex`) | plan from usage payload | `chatgpt.com/backend-api/wham/usage` + `.../rate-limit-reset-credits` |
 | Kimi (`kimi-coding`) | membership level from usage payload | `api.kimi.com/coding/v1/usages` |
-| Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly SuperGrok pool; monthly shape kept as fallback) |
+| Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly SuperGrok pool; monthly shape kept as fallback) + redeemed-reset detection |
 
 ## Privacy & security
 
 - OAuth access tokens come from **pi's auth store only** (`ctx.modelRegistry.getProviderAuth`). API-key credentials are never sent to subscription endpoints.
+- The Grok reset-detection feature persists a small state file at `~/.pi/agent/usage-meters-state.json` (override: `PI_USAGE_METERS_STATE`). It contains only the last-seen Grok weekly period boundaries, pool percentage, and a timestamp — no tokens, no secrets, no other providers. It is written atomically, deletable at any time, and never leaves the machine.
 - Codex's non-secret account ID is decoded from the OAuth JWT; this package never opens `~/.pi/agent/auth.json`.
 - Tokens are used solely as `Authorization: Bearer` on the provider's own HTTPS quota endpoints. They are never logged, rendered, or written into session entries. Remote error bodies are not persisted.
 - API responses are size-limited; untrusted strings are length-limited and stripped of terminal controls, ANSI, and bidirectional-text controls both before storage and again at render time.
@@ -44,7 +45,8 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 - These quota endpoints are **undocumented** and may change without notice; each provider fetch is isolated and fails soft.
 - Codex banked-reset lookup currently sends `OpenAI-Beta: codex-1` and `originator: Codex Desktop`, matching the existing Codex client endpoint contract. Review this compatibility choice if OpenAI publishes an official replacement.
 - Grok SuperGrok usage is the shared weekly credit pool (`creditUsagePercent`), with optional per-product split (Build/Chat/Imagine). Legacy monthly credit totals remain as a fallback if the weekly payload is absent.
-- Grok weekly-reset credits are not currently exposed by xAI's billing endpoints — the meter shows the weekly pool itself, not a reset count. `scripts/probe-grok-billing.mjs` (repo only, not shipped) dumps the sanitized payload; re-run it while your account holds an unused reset to check whether xAI has started exposing the field.
+- Grok usage-reset credits are served only to the grok.com web app (a cookie-authenticated Connect RPC, `prod_mc_billing.ConsumerUiSvc/GetRemainingResets`); the OAuth-reachable billing API never reports them. The meter therefore **detects redeemed resets by inference**: within one weekly period the pool percentage only climbs, so a drop of 5+ points while the period is unchanged is reported as `Reset used 21 Aug (35% → 5%)`. This needs a small state file (see Privacy). It is inference — an xAI-side recomputation could in theory produce the same signature. If xAI ever exposes explicit counts (`resetsRemaining`), they are rendered as `Resets N available` and take precedence in spirit. `scripts/probe-grok-billing.mjs` (repo only, not shipped) dumps the sanitized payload for re-checking.
+- The state file path defaults to `~/.pi/agent/usage-meters-state.json` and can be overridden with the `PI_USAGE_METERS_STATE` environment variable. Delete the file at any time; the meter simply re-seeds a baseline on the next `/usage` (no reset line is reported for the first observation).
 - The pie glyph uses `○ ◔ ◑ ◕ ●` from the Unicode Geometric Shapes block so a single font renders all states uniformly.
 - Requires a pi version with OAuth login support for the providers you use (`/login anthropic`, `/login openai-codex`, `/login kimi-coding`, `/login xai`).
 

@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   bar,
   clean,
@@ -19,6 +22,9 @@ import {
 } from "../extensions/core.js";
 
 const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+
+// All stateful Grok-detection tests must hit a throwaway state file, never the user's.
+process.env.PI_USAGE_METERS_STATE ||= join(mkdtempSync(join(tmpdir(), "pum-tests-")), "state.json");
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -321,3 +327,101 @@ test("publish workflow is OIDC-only", async () => {
   assert.match(workflow, /npm publish --access public --provenance/);
   assert.doesNotMatch(workflow, /NODE_AUTH_TOKEN|NPM_TOKEN/);
 });
+
+// --- Grok reset detection (stateful inference) ---
+
+function withState(run) {
+  const dir = mkdtempSync(join(tmpdir(), "pum-state-"));
+  const prev = process.env.PI_USAGE_METERS_STATE;
+  process.env.PI_USAGE_METERS_STATE = join(dir, "state.json");
+  return Promise.resolve(run(join(dir, "state.json"))).finally(() => {
+    if (prev === undefined) delete process.env.PI_USAGE_METERS_STATE;
+    else process.env.PI_USAGE_METERS_STATE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+const grokBilling = (periodStart, periodEnd, creditUsagePercent, extra = {}) => ({
+  config: {
+    currentPeriod: {
+      type: "USAGE_PERIOD_TYPE_WEEKLY",
+      start: periodStart,
+      end: periodEnd,
+    },
+    creditUsagePercent,
+    isUnifiedBillingUser: true,
+    ...extra,
+  },
+});
+
+const PERIOD_A = ["2026-08-19T22:08:22Z", "2026-08-26T22:08:22Z"];
+const PERIOD_B = ["2026-08-26T22:08:22Z", "2026-09-02T22:08:22Z"];
+
+function grokCtx() {
+  return authContext({ xai: oauth("grok-token") });
+}
+
+async function runGrokFetch(body, statePath, seed) {
+  if (seed !== undefined) writeFileSync(statePath, JSON.stringify(seed));
+  let lines;
+  await withFetch(async (url) => {
+    if (String(url).endsWith("/settings")) return json({});
+    return json(body);
+  }, async () => {
+    lines = await fetchXai(grokCtx());
+  });
+  return lines;
+}
+
+test("Grok: same-week usage drop is reported as a redeemed reset", () => withState(async (statePath) => {
+  const lines = await runGrokFetch(
+    grokBilling(PERIOD_A[0], PERIOD_A[1], 5),
+    statePath,
+    { xai: { periodStart: PERIOD_A[0], periodEnd: PERIOD_A[1], pct: 35, seenAt: "2026-08-21T10:00:00Z" } },
+  );
+  assert.match(lines.join("\n"), /Reset used.*\d{1,2} [A-Z][a-z]{2} \(35% → 5%\)/);
+  const stored = JSON.parse(readFileSync(statePath, "utf8"));
+  assert.equal(stored.xai.pct, 5);
+}));
+
+test("Grok: rising usage updates state without a reset line", () => withState(async (statePath) => {
+  const lines = await runGrokFetch(
+    grokBilling(PERIOD_A[0], PERIOD_A[1], 15),
+    statePath,
+    { xai: { periodStart: PERIOD_A[0], periodEnd: PERIOD_A[1], pct: 5, seenAt: "2026-08-21T10:00:00Z" } },
+  );
+  assert.doesNotMatch(lines.join("\n"), /Reset used/);
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).xai.pct, 15);
+}));
+
+test("Grok: new weekly period never fires a reset line", () => withState(async (statePath) => {
+  const lines = await runGrokFetch(
+    grokBilling(PERIOD_B[0], PERIOD_B[1], 3),
+    statePath,
+    { xai: { periodStart: PERIOD_A[0], periodEnd: PERIOD_A[1], pct: 100, seenAt: "2026-08-25T10:00:00Z" } },
+  );
+  assert.doesNotMatch(lines.join("\n"), /Reset used/);
+  const stored = JSON.parse(readFileSync(statePath, "utf8"));
+  assert.equal(stored.xai.periodStart, PERIOD_B[0]);
+}));
+
+test("Grok: missing or corrupt state seeds a baseline without errors", () => withState(async (statePath) => {
+  const first = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 10), statePath);
+  assert.doesNotMatch(first.join("\n"), /Reset used/);
+  assert.ok(existsSync(statePath));
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).xai.pct, 10);
+
+  writeFileSync(statePath, "{not json");
+  const second = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 12), statePath);
+  assert.doesNotMatch(second.join("\n"), /Reset used/);
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).xai.pct, 12);
+}));
+
+test("Grok: explicit reset-count fields are rendered when xAI ever exposes them", () => withState(async (statePath) => {
+  const lines = await runGrokFetch(
+    grokBilling(PERIOD_A[0], PERIOD_A[1], 40, { resetsRemaining: 2 }),
+    statePath,
+  );
+  assert.match(lines.join("\n"), /Resets\s+2 available/);
+  assert.doesNotMatch(lines.join("\n"), /Reset used/);
+}));

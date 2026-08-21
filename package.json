@@ -1,6 +1,6 @@
 {
   "name": "pi-usage-meters",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Pi extension: /usage shows subscription quota meters for OAuth-logged-in Claude, Codex, Kimi, and Grok accounts.",
   "keywords": [
     "pi-package",
