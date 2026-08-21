@@ -18,7 +18,7 @@ Try without installing:
 pi -e npm:pi-usage-meters
 ```
 
-Then run `/usage` in any pi session. Results are cached in memory for 60 seconds; use `/usage --refresh` to bypass the cache. No configuration needed — OAuth credentials come from pi's own auth store (`/login`) and refresh automatically. API-key credentials are deliberately rejected. Providers without OAuth login show a one-line hint.
+Then run `/usage` in any pi session. Results are cached in memory for 60 seconds; use `/usage --refresh` to bypass the cache. No configuration needed — OAuth credentials come from pi's own auth store (`/login`) and refresh automatically; the GLM meter uses your `ZAI_API_KEY` (any auth source pi resolves for `zai`). OAuth providers without login show a one-line hint.
 
 ## Providers & endpoints
 
@@ -32,7 +32,7 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 
 ## Privacy & security
 
-- OAuth access tokens come from **pi's auth store only** (`ctx.modelRegistry.getProviderAuth`). API-key credentials are never sent to subscription endpoints.
+- OAuth access tokens come from **pi's auth store only** (`ctx.modelRegistry.getProviderAuth`). The GLM meter resolves your `zai` API key the same way and sends it **only** to `api.z.ai` (the key's own issuer) — never to any other provider's endpoint.
 - The Grok reset-detection feature persists a small state file at `~/.pi/agent/usage-meters-state.json` (override: `PI_USAGE_METERS_STATE`). It contains only the last-seen Grok weekly period boundaries, pool percentage, and a timestamp — no tokens, no secrets, no other providers. It is written atomically, deletable at any time, and never leaves the machine.
 - Codex's non-secret account ID is decoded from the OAuth JWT; this package never opens `~/.pi/agent/auth.json`.
 - Tokens are used solely as `Authorization: Bearer` on the provider's own HTTPS quota endpoints. They are never logged, rendered, or written into session entries. Remote error bodies are not persisted.
