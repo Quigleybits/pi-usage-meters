@@ -12,6 +12,7 @@ import {
   createUsageLoader,
   fetchAnthropic,
   fetchCodex,
+  fetchGlm,
   fetchKimi,
   fetchXai,
   getJson,
@@ -175,6 +176,52 @@ test("Codex derives window labels, omits absent plan, and keeps one expiry per r
   });
 });
 
+test("GLM parses API-key auth and splits credit windows by reset horizon", async () => {
+  const ctx = authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } });
+  await withFetch(async (url, init) => {
+    assert.equal(String(url), "https://api.z.ai/api/monitor/usage/quota/limit");
+    assert.equal(init.headers.Authorization, "Bearer zai-key");
+    assert.equal(init.headers["Accept-Language"], "en-US,en");
+    return json({
+      code: 200,
+      data: {
+        level: "lite",
+        limits: [
+          { type: "CREDIT_LIMIT", usage: 2000, currentValue: 716, percentage: 35, nextResetTime: Date.now() + 4 * 3600e3 },
+          { type: "CREDIT_LIMIT", usage: 10000, currentValue: 3440, percentage: 34, nextResetTime: Date.now() + 80 * 3600e3 },
+        ],
+      },
+    });
+  }, async () => {
+    const lines = await fetchGlm(ctx);
+    assert.equal(lines[0], "GLM (lite plan)");
+    assert.match(lines[1], /Session \(credits\).*35%.*716\/2,000/);
+    assert.match(lines[2], /Month \(credits\).*34%.*3,440\/10,000/);
+  });
+});
+
+test("GLM handles legacy limit shapes and reports a missing API key", async () => {
+  const noKey = authContext({ zai: { source: "none", auth: {} } });
+  const missing = await fetchGlm(noKey);
+  assert.equal(missing[0], "GLM");
+  assert.match(missing[1], /ZAI_API_KEY/);
+
+  const ctx = authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } });
+  await withFetch(async () => json({
+    data: {
+      limits: [
+        { type: "TOKENS_LIMIT", percentage: 42 },
+        { type: "TIME_LIMIT", percentage: 10, currentValue: 3, usage: 100, nextResetTime: Date.now() + 10 * 86400e3 },
+      ],
+    },
+  }), async () => {
+    const lines = await fetchGlm(ctx);
+    assert.equal(lines[0], "GLM");
+    assert.match(lines[1], /Session \(tokens\).*42%/);
+    assert.match(lines[2], /MCP \(month\).*10%.*3\/100/);
+  });
+});
+
 test("Kimi parses bearer-auth membership and session and weekly quotas", async () => {
   const ctx = authContext({
     "kimi-coding": { source: "OAuth", auth: { headers: { Authorization: "Bearer kimi-token" } } },
@@ -309,9 +356,9 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   const load = createUsageLoader();
   const [a, b] = await Promise.all([load(ctx), load(ctx)]);
   assert.equal(a, b);
-  assert.equal(resolutions, 4);
+  assert.equal(resolutions, 5);
   assert.equal(await load(ctx), a);
-  assert.equal(resolutions, 4);
+  assert.equal(resolutions, 5);
 });
 
 test("package manifest limits files and includes community metadata", () => {

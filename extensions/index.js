@@ -9,7 +9,7 @@ export default function (pi) {
   ));
 
   pi.registerCommand("usage", {
-    description: "Show subscription quota for logged-in OAuth providers",
+    description: "Show subscription quota for connected providers",
     handler: async (args, ctx) => {
       const arg = String(args ?? "").trim();
       if (arg && arg !== "--refresh") {

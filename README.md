@@ -1,6 +1,6 @@
 # pi-usage-meters
 
-A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're logged into via pi's OAuth** — one compact, colour-coded block instead of four dashboards.
+A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're connected to** — one compact, colour-coded block instead of five dashboards. Claude, Codex, Kimi, and Grok authenticate via pi's OAuth; GLM uses your `ZAI_API_KEY`.
 
 ![Colour-coded usage meters for Claude, Codex, Kimi, and Grok (synthetic fixture data)](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/b8b83acbd3c41bbca9d8ce0274767e9400a9e459/assets/pi-usage.png)
 
@@ -27,6 +27,7 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 | Claude (`anthropic`) | `api.anthropic.com/api/oauth/profile` | `api.anthropic.com/api/oauth/usage` |
 | Codex (`openai-codex`) | plan from usage payload | `chatgpt.com/backend-api/wham/usage` + `.../rate-limit-reset-credits` |
 | Kimi (`kimi-coding`) | membership level from usage payload | `api.kimi.com/coding/v1/usages` |
+| GLM (`zai`) | plan level from usage payload | `api.z.ai/api/monitor/usage/quota/limit` (coding-plan credit windows: 5h session + monthly; session/month split by reset horizon) |
 | Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly SuperGrok pool; monthly shape kept as fallback) + redeemed-reset detection |
 
 ## Privacy & security

@@ -49,6 +49,7 @@ export const COLORS = {
   Codex: rgb("#ffffff"),
   Kimi: rgb("#4fa8ff"),
   Grok: rgb("#8a8a8a"),
+  GLM: rgb("#9b8cff"),
 };
 
 export function clean(value, max = 200) {
@@ -99,8 +100,10 @@ const field = (label) => clean(label, LABEL_W).padEnd(LABEL_W);
 
 export function line(label, value, resetMs, windowMs) {
   const usedPct = clampPct(value);
-  const clock = Number.isFinite(resetMs) && Number.isFinite(windowMs) && windowMs > 0
-    ? ` reset ${pie(windowMs, resetMs)} ${fmtReset(resetMs)}`
+  const clock = Number.isFinite(resetMs)
+    ? Number.isFinite(windowMs) && windowMs > 0
+      ? ` reset ${pie(windowMs, resetMs)} ${fmtReset(resetMs)}`
+      : ` reset ${fmtReset(resetMs)}`
     : "";
   return `  ${field(label)} ${bar(usedPct)} ${String(Math.round(usedPct)).padStart(3)}%${clock}`;
 }
@@ -185,6 +188,13 @@ export async function tokenFor(ctx, provider) {
     : Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === "authorization")?.[1];
   const match = typeof authorization === "string" && authorization.match(/^Bearer\s+(.+)$/i);
   return match?.[1]?.trim() || undefined;
+}
+
+// zai is an API-key provider (ZAI_API_KEY), not OAuth — accept the key from any auth source.
+export async function apiKeyFor(ctx, provider) {
+  const result = await ctx.modelRegistry.getProviderAuth(provider);
+  const key = typeof result?.auth?.apiKey === "string" ? result.auth.apiKey : "";
+  return key.trim() || undefined;
 }
 
 export function codexAccountId(token) {
@@ -396,11 +406,47 @@ export async function fetchXai(ctx) {
   return lines;
 }
 
+// GLM coding plan: same monitor endpoint the official zai-coding-plugins uses (undocumented, may change).
+// Bearer auth accepted there (verified), so getJson works as-is.
+export async function fetchGlm(ctx) {
+  const token = await apiKeyFor(ctx, "zai");
+  if (!token) return ["GLM", plain("error", "API key not set (ZAI_API_KEY)")];
+  const res = await getJson("https://api.z.ai/api/monitor/usage/quota/limit", token, {
+    "Accept-Language": "en-US,en",
+  });
+  const data = res?.data ?? res;
+  const level = clean(String(data?.level ?? "").toLowerCase(), 24);
+  const lines = [header("GLM", level ? `${level} plan` : undefined)];
+  const counts = (current, total) => {
+    const c = Number(current);
+    const t = Number(total);
+    return Number.isFinite(c) && Number.isFinite(t) && t > 0 ? ` · ${c.toLocaleString()}/${t.toLocaleString()}` : "";
+  };
+  for (const limit of (data?.limits ?? []).slice(0, 6)) {
+    const type = String(limit?.type ?? "");
+    const percent = clampPct(Number(limit?.percentage));
+    const resetMs = Number(limit?.nextResetTime);
+    if (type === "TOKENS_LIMIT") {
+      lines.push(line("Session (tokens)", percent));
+    } else if (type === "TIME_LIMIT") {
+      lines.push(line("MCP (month)", percent, Number.isFinite(resetMs) ? resetMs : NaN)
+        + counts(limit.currentValue, limit.usage));
+    } else if (type === "CREDIT_LIMIT") {
+      // 5h credit window resets within hours; the monthly one days/weeks out (verified: 4.1h vs 75.7h).
+      const isSession = Number.isFinite(resetMs) && resetMs - Date.now() <= 86400e3;
+      lines.push(line(isSession ? "Session (credits)" : "Month (credits)", percent, resetMs, isSession ? H5 : 0)
+        + counts(limit.currentValue, limit.usage));
+    }
+  }
+  return lines;
+}
+
 const FETCHERS = [
   ["Claude", fetchAnthropic, "anthropic"],
   ["Codex", fetchCodex, "openai-codex"],
   ["Kimi", fetchKimi, "kimi-coding"],
   ["Grok", fetchXai, "xai"],
+  ["GLM", fetchGlm, "zai"],
 ];
 
 function safeError(error) {
@@ -419,7 +465,8 @@ async function fetchAll(ctx) {
       return { name, lines: await fetcher(ctx) };
     } catch (error) {
       if (error?.message === "HTTP 401") {
-        return { name, lines: [name, `  OAuth token rejected (/login ${login})`] };
+        const hint = name === "GLM" ? "ZAI API key rejected" : `OAuth token rejected (/login ${login})`;
+        return { name, lines: [name, `  ${hint}`] };
       }
       return { name, lines: [name, plain("error", safeError(error))] };
     }
