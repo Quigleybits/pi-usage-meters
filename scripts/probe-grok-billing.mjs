@@ -68,6 +68,54 @@ if (process.argv.includes("--explore")) {
   );
 }
 
+// Connect-RPC probe: the grok.com web app reads usage-reset tokens via
+// prod_mc_billing.ConsumerUiSvc/GetRemainingResets (see repo notes). Try it with
+// the pi OAuth Bearer on both hosts to see if the method is reachable for the plugin.
+if (process.argv.includes("--resets")) {
+  for (const base of [
+    "https://grok.com/api",
+    "https://grok.com",
+    "https://cli-chat-proxy.grok.com",
+  ]) {
+    for (const method of ["GetRemainingResets", "GetGrokUsageInfo", "NoSuchMethodXyz"]) {
+      const url = `${base}/prod_mc_billing.ConsumerUiSvc/${method}`;
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+          body: "{}",
+        });
+        const text = await res.text();
+        console.log(`\n=== POST ${url} → HTTP ${res.status} (${text.length}B) ===`);
+        try {
+          console.log(JSON.stringify(sanitize(JSON.parse(text)), null, 2).slice(0, 2000));
+        } catch {
+          console.log(text.slice(0, 300));
+        }
+      } catch (error) {
+        console.log(`\n=== POST ${url} → ${error?.cause?.code ?? error?.message} ===`);
+      }
+    }
+  }
+  // Distinguish a real handler from an edge stub: compare no-auth vs Bearer vs Connect header.
+  const resetUrl = "https://grok.com/prod_mc_billing.ConsumerUiSvc/GetRemainingResets";
+  for (const [label, headers] of [
+    ["no-auth", { "Content-Type": "application/json" }],
+    ["bearer", { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }],
+    ["bearer+connect-v1", { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Connect-Protocol-Version": "1" }],
+  ]) {
+    try {
+      const res = await fetch(resetUrl, { method: "POST", headers, body: "{}" });
+      const text = await res.text();
+      const www = res.headers.get("www-authenticate") ?? "";
+      console.log(`\n=== ${label} → HTTP ${res.status} (${text.length}B) ${www} ===`);
+      if (text) console.log(text.slice(0, 300));
+    } catch (error) {
+      console.log(`\n=== ${label} → ${error?.cause?.code ?? error?.message} ===`);
+    }
+  }
+}
+
 for (const url of urls) {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
   console.log(`\n=== ${url} → HTTP ${res.status} ===`);
