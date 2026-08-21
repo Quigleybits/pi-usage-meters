@@ -44,6 +44,7 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 - These quota endpoints are **undocumented** and may change without notice; each provider fetch is isolated and fails soft.
 - Codex banked-reset lookup currently sends `OpenAI-Beta: codex-1` and `originator: Codex Desktop`, matching the existing Codex client endpoint contract. Review this compatibility choice if OpenAI publishes an official replacement.
 - Grok SuperGrok usage is the shared weekly credit pool (`creditUsagePercent`), with optional per-product split (Build/Chat/Imagine). Legacy monthly credit totals remain as a fallback if the weekly payload is absent.
+- Grok weekly-reset credits are not currently exposed by xAI's billing endpoints — the meter shows the weekly pool itself, not a reset count. `scripts/probe-grok-billing.mjs` (repo only, not shipped) dumps the sanitized payload; re-run it while your account holds an unused reset to check whether xAI has started exposing the field.
 - The pie glyph uses `○ ◔ ◑ ◕ ●` from the Unicode Geometric Shapes block so a single font renders all states uniformly.
 - Requires a pi version with OAuth login support for the providers you use (`/login anthropic`, `/login openai-codex`, `/login kimi-coding`, `/login xai`).
 
