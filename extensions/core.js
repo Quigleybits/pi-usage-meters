@@ -434,9 +434,17 @@ export async function fetchGlm(ctx) {
       lines.push(line("MCP (month)", percent, Number.isFinite(resetMs) ? resetMs : NaN)
         + counts(limit.currentValue, limit.usage));
     } else if (type === "CREDIT_LIMIT") {
-      // 5h credit window resets within hours; the monthly one days/weeks out (verified: 4.1h vs 75.7h).
-      const isSession = Number.isFinite(resetMs) && resetMs - Date.now() <= 86400e3;
-      lines.push(line(isSession ? "Session (credits)" : "Month (credits)", percent, resetMs, isSession ? H5 : 0)
+      // Window shape: unit/number encode the rolling window (verified: {unit:3,number:5}=5h
+      // session with NO nextResetTime field; {unit:6,number:1}=monthly with epoch-ms reset).
+      const UNIT_MS = { 1: 1e3, 2: 60e3, 3: 3600e3, 4: 86400e3, 5: D7, 6: 30 * 86400e3 };
+      const unit = Number(limit?.unit);
+      const number = Number(limit?.number);
+      const windowMs = unit > 0 && number > 0 ? (UNIT_MS[unit] ?? 0) * number : NaN;
+      // Session when the window itself is short (≤24h); fall back to the reset horizon.
+      const isSession = Number.isFinite(windowMs)
+        ? windowMs <= 86400e3
+        : Number.isFinite(resetMs) && resetMs - Date.now() <= 86400e3;
+      lines.push(line(isSession ? (Number.isFinite(windowMs) ? windowLabel(windowMs) : "Session (credits)") : "Month (credits)", percent, resetMs, windowMs)
         + counts(limit.currentValue, limit.usage));
     }
   }
