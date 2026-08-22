@@ -425,7 +425,9 @@ export async function fetchGlm(ctx) {
   for (const limit of (data?.limits ?? []).slice(0, 6)) {
     const type = String(limit?.type ?? "");
     const percent = clampPct(Number(limit?.percentage));
-    const resetMs = Number(limit?.nextResetTime);
+    // API may send epoch-ms or an ISO string; Number() on an ISO string is NaN.
+    const rawReset = limit?.nextResetTime;
+    const resetMs = typeof rawReset === "number" ? rawReset : Date.parse(String(rawReset ?? ""));
     if (type === "TOKENS_LIMIT") {
       lines.push(line("Session (tokens)", percent));
     } else if (type === "TIME_LIMIT") {

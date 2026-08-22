@@ -200,6 +200,24 @@ test("GLM parses API-key auth and splits credit windows by reset horizon", async
   });
 });
 
+test("GLM parses ISO-string nextResetTime instead of mislabeling the session window as Month", async () => {
+  const ctx = authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } });
+  await withFetch(async () => json({
+    code: 200,
+    data: {
+      level: "lite",
+      limits: [
+        { type: "CREDIT_LIMIT", usage: 2000, currentValue: 0, percentage: 0, nextResetTime: new Date(Date.now() + 3 * 3600e3).toISOString() },
+        { type: "CREDIT_LIMIT", usage: 10000, currentValue: 4343, percentage: 43, nextResetTime: Date.now() + 62 * 3600e3 },
+      ],
+    },
+  }), async () => {
+    const lines = await fetchGlm(ctx);
+    assert.match(lines[1], /Session \(credits\).*0%.*0\/2,000/);
+    assert.match(lines[2], /Month \(credits\).*43%.*4,343\/10,000/);
+  });
+});
+
 test("GLM handles legacy limit shapes and reports a missing API key", async () => {
   const noKey = authContext({ zai: { source: "none", auth: {} } });
   const missing = await fetchGlm(noKey);
