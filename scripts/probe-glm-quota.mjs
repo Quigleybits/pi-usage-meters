@@ -1,7 +1,8 @@
 // Dev probe: dump the raw GLM/Z.ai quota payload shape (key never printed).
 // Usage: node scripts/probe-glm-quota.mjs
-// Reads ZAI_API_KEY from <home>/git_projects/coop-light/.env in-process,
-// calls the undocumented monitor endpoint, prints sanitized JSON.
+// Reads ZAI_API_KEY or ZAI_CODING_CN_API_KEY from the environment or
+// <home>/git_projects/coop-light/.env, calls the matching undocumented
+// monitor endpoint, and prints sanitized JSON.
 // Not shipped: excluded via package.json "files".
 
 import { readFile } from "node:fs/promises";
@@ -23,7 +24,7 @@ function readDotenvValue(text, variable) {
     }
     if (value) matches.push(value);
   }
-  if (matches.length !== 1) throw new Error(`expected exactly one ${variable} entry in ${ENV_FILE}`);
+  if (matches.length > 1) throw new Error(`expected at most one ${variable} entry in ${ENV_FILE}`);
   return matches[0];
 }
 
@@ -42,10 +43,32 @@ function sanitize(value, depth = 0) {
   return String(value);
 }
 
-const key = readDotenvValue(await readFile(ENV_FILE, "utf8"), "ZAI_API_KEY");
-const url = "https://api.z.ai/api/monitor/usage/quota/limit";
+const dotenv = await readFile(ENV_FILE, "utf8").catch(() => "");
+const providers = [
+  {
+    variable: "ZAI_API_KEY",
+    url: "https://api.z.ai/api/monitor/usage/quota/limit",
+    authorization: (key) => `Bearer ${key}`,
+  },
+  {
+    variable: "ZAI_CODING_CN_API_KEY",
+    url: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
+    authorization: (key) => key,
+  },
+];
+let selected;
+for (const provider of providers) {
+  const key = process.env[provider.variable]?.trim() || readDotenvValue(dotenv, provider.variable);
+  if (key) {
+    selected = { ...provider, key };
+    break;
+  }
+}
+if (!selected) throw new Error("ZAI_API_KEY or ZAI_CODING_CN_API_KEY is required");
+
+const { key, url } = selected;
 const res = await fetch(url, {
-  headers: { Authorization: `Bearer ${key}`, "Accept-Language": "en-US,en" },
+  headers: { Authorization: selected.authorization(key), "Accept-Language": "en-US,en" },
 });
 console.log(`HTTP ${res.status}`);
 const body = await res.text();

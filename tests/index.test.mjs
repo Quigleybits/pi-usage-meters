@@ -177,7 +177,10 @@ test("Codex derives window labels, omits absent plan, and keeps one expiry per r
 });
 
 test("GLM parses API-key auth and splits credit windows by reset horizon", async () => {
-  const ctx = authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } });
+  const ctx = authContext({
+    zai: { source: "apiKey", auth: { apiKey: "zai-key" } },
+    "zai-coding-cn": { source: "apiKey", auth: { apiKey: "zai-cn-key" } },
+  });
   await withFetch(async (url, init) => {
     assert.equal(String(url), "https://api.z.ai/api/monitor/usage/quota/limit");
     assert.equal(init.headers.Authorization, "Bearer zai-key");
@@ -200,6 +203,32 @@ test("GLM parses API-key auth and splits credit windows by reset horizon", async
   });
 });
 
+test("GLM supports China-region API-key auth and quota endpoint", async () => {
+  const ctx = authContext({
+    "zai-coding-cn": { source: "apiKey", auth: { apiKey: "zai-cn-key" } },
+  });
+  await withFetch(async (url, init) => {
+    assert.equal(String(url), "https://open.bigmodel.cn/api/monitor/usage/quota/limit");
+    assert.equal(init.headers.Authorization, "zai-cn-key");
+    assert.equal(init.headers["Accept-Language"], "en-US,en");
+    return json({
+      code: 200,
+      data: {
+        level: "pro",
+        limits: [
+          { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 25, nextResetTime: Date.now() + 4 * 3600e3 },
+          { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 40, nextResetTime: Date.now() + 20 * 86400e3 },
+        ],
+      },
+    });
+  }, async () => {
+    const lines = await fetchGlm(ctx);
+    assert.equal(lines[0], "GLM (pro plan)");
+    assert.match(lines[1], /Session \(5h\).*25%/);
+    assert.match(lines[2], /Month \(tokens\).*40%/);
+  });
+});
+
 test("GLM classifies credit windows via unit/number when nextResetTime is absent", async () => {
   const ctx = authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } });
   await withFetch(async () => json({
@@ -219,10 +248,14 @@ test("GLM classifies credit windows via unit/number when nextResetTime is absent
 });
 
 test("GLM handles legacy limit shapes and reports a missing API key", async () => {
-  const noKey = authContext({ zai: { source: "none", auth: {} } });
+  const noKey = authContext({
+    zai: { source: "none", auth: {} },
+    "zai-coding-cn": { source: "none", auth: {} },
+  });
   const missing = await fetchGlm(noKey);
   assert.equal(missing[0], "GLM");
   assert.match(missing[1], /ZAI_API_KEY/);
+  assert.match(missing[1], /ZAI_CODING_CN_API_KEY/);
 
   const ctx = authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } });
   await withFetch(async () => json({
@@ -374,9 +407,9 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   const load = createUsageLoader();
   const [a, b] = await Promise.all([load(ctx), load(ctx)]);
   assert.equal(a, b);
-  assert.equal(resolutions, 5);
+  assert.equal(resolutions, 6);
   assert.equal(await load(ctx), a);
-  assert.equal(resolutions, 5);
+  assert.equal(resolutions, 6);
 });
 
 test("package manifest limits files and includes community metadata", () => {

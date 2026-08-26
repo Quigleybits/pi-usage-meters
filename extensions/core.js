@@ -156,7 +156,7 @@ export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) 
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
-      headers: { ...headers, Authorization: `Bearer ${token}`, Accept: "application/json" },
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...headers },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const declared = Number(res.headers.get("content-length"));
@@ -406,12 +406,36 @@ export async function fetchXai(ctx) {
   return lines;
 }
 
-// GLM coding plan: same monitor endpoint the official zai-coding-plugins uses (undocumented, may change).
-// Bearer auth accepted there (verified), so getJson works as-is.
+// GLM coding plan: monitor endpoints used by the official zai-coding-plugins
+// (undocumented, may change). Keep global first for backward compatibility.
+const GLM_PROVIDERS = [
+  {
+    provider: "zai",
+    endpoint: "https://api.z.ai/api/monitor/usage/quota/limit",
+    authorization: (key) => `Bearer ${key}`,
+  },
+  {
+    provider: "zai-coding-cn",
+    endpoint: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
+    authorization: (key) => key,
+  },
+];
+
+async function glmAuthFor(ctx) {
+  for (const config of GLM_PROVIDERS) {
+    const key = await apiKeyFor(ctx, config.provider);
+    if (key) return { ...config, key };
+  }
+  return undefined;
+}
+
 export async function fetchGlm(ctx) {
-  const token = await apiKeyFor(ctx, "zai");
-  if (!token) return ["GLM", plain("error", "API key not set (ZAI_API_KEY)")];
-  const res = await getJson("https://api.z.ai/api/monitor/usage/quota/limit", token, {
+  const auth = await glmAuthFor(ctx);
+  if (!auth) {
+    return ["GLM", plain("error", "API key not set (ZAI_API_KEY or ZAI_CODING_CN_API_KEY)")];
+  }
+  const res = await getJson(auth.endpoint, auth.key, {
+    Authorization: auth.authorization(auth.key),
     "Accept-Language": "en-US,en",
   });
   const data = res?.data ?? res;
@@ -428,22 +452,25 @@ export async function fetchGlm(ctx) {
     // API may send epoch-ms or an ISO string; Number() on an ISO string is NaN.
     const rawReset = limit?.nextResetTime;
     const resetMs = typeof rawReset === "number" ? rawReset : Date.parse(String(rawReset ?? ""));
+    const UNIT_MS = { 1: 1e3, 2: 60e3, 3: 3600e3, 4: 86400e3, 5: D7, 6: 30 * 86400e3 };
+    const unit = Number(limit?.unit);
+    const number = Number(limit?.number);
+    const windowMs = unit > 0 && number > 0 ? (UNIT_MS[unit] ?? 0) * number : NaN;
+    const isSession = Number.isFinite(windowMs)
+      ? windowMs <= 86400e3
+      : Number.isFinite(resetMs) && resetMs - Date.now() <= 86400e3;
     if (type === "TOKENS_LIMIT") {
-      lines.push(line("Session (tokens)", percent));
+      const label = Number.isFinite(windowMs)
+        ? (isSession ? windowLabel(windowMs) : "Month (tokens)")
+        : "Session (tokens)";
+      lines.push(line(label, percent, resetMs, windowMs));
     } else if (type === "TIME_LIMIT") {
       lines.push(line("MCP (month)", percent, Number.isFinite(resetMs) ? resetMs : NaN)
         + counts(limit.currentValue, limit.usage));
     } else if (type === "CREDIT_LIMIT") {
       // Window shape: unit/number encode the rolling window (verified: {unit:3,number:5}=5h
       // session with NO nextResetTime field; {unit:6,number:1}=monthly with epoch-ms reset).
-      const UNIT_MS = { 1: 1e3, 2: 60e3, 3: 3600e3, 4: 86400e3, 5: D7, 6: 30 * 86400e3 };
-      const unit = Number(limit?.unit);
-      const number = Number(limit?.number);
-      const windowMs = unit > 0 && number > 0 ? (UNIT_MS[unit] ?? 0) * number : NaN;
       // Session when the window itself is short (≤24h); fall back to the reset horizon.
-      const isSession = Number.isFinite(windowMs)
-        ? windowMs <= 86400e3
-        : Number.isFinite(resetMs) && resetMs - Date.now() <= 86400e3;
       lines.push(line(isSession ? (Number.isFinite(windowMs) ? windowLabel(windowMs) : "Session (credits)") : "Month (credits)", percent, resetMs, windowMs)
         + counts(limit.currentValue, limit.usage));
     }
