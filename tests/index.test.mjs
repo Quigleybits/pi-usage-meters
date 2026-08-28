@@ -19,6 +19,7 @@ import {
   line,
   pie,
   renderContent,
+  STAMP,
   tokenFor,
 } from "../extensions/core.js";
 
@@ -252,10 +253,10 @@ test("GLM handles legacy limit shapes and reports a missing API key", async () =
     zai: { source: "none", auth: {} },
     "zai-coding-cn": { source: "none", auth: {} },
   });
-  const missing = await fetchGlm(noKey);
-  assert.equal(missing[0], "GLM");
-  assert.match(missing[1], /ZAI_API_KEY/);
-  assert.match(missing[1], /ZAI_CODING_CN_API_KEY/);
+  await assert.rejects(
+    fetchGlm(noKey),
+    (error) => error.name === "NotConnected" && /set ZAI_API_KEY or ZAI_CODING_CN_API_KEY/.test(error.hint),
+  );
 
   const ctx = authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } });
   await withFetch(async () => json({
@@ -372,7 +373,11 @@ test("HTTP 401 from a usage endpoint prompts re-login for that provider", async 
   await withFetch(async () => json({}, { status: 401 }), async () => {
     const data = await load(ctx);
     const grok = data.blocks.find((block) => block.name === "Grok");
-    assert.match(grok.lines.join("\n"), /OAuth token rejected \(\/login xai\)/);
+    assert.equal(grok.status, "rejected");
+    assert.equal(grok.lines, undefined);
+    const rendered = renderContent(data);
+    assert.match(rendered, /Grok: login expired \(\/login xai\)/);
+    assert.doesNotMatch(rendered, /OAuth token rejected/);
   });
 });
 
@@ -417,6 +422,71 @@ test("Codex block uses the terminal's default foreground", () => {
   const rendered = renderContent({ blocks: [{ name: "Codex", lines: ["Codex"] }] });
   assert.doesNotMatch(rendered, /38;2;255;255;255/);
   assert.match(renderContent({ blocks: [{ name: "Claude", lines: ["Claude"] }] }), /38;2;215;119;87/);
+});
+
+test("unconnected and failing providers collapse into dim footer lines", () => {
+  const data = {
+    blocks: [
+      { name: "Claude", lines: ["Claude (Max x5)", "  Session (5h)   ████░░░░░░  42%"] },
+      { name: "Codex", status: "unconnected", hint: "/login openai-codex" },
+      { name: "Kimi", status: "unconnected", hint: "/login kimi-coding" },
+      { name: "Grok", status: "nodata" },
+      { name: "GLM", status: "error", detail: "timed out (8s)" },
+    ],
+    fetchedAt: "2026-01-01T00:00:00Z",
+  };
+  const lines = renderContent(data).split("\n");
+  assert.equal(lines.length, 6);
+  assert.match(lines[0], /Claude \(Max x5\)/);
+  assert.match(lines[2], /Grok: no plan data/);
+  assert.match(lines[3], /GLM: timed out \(8s\)/);
+  assert.match(lines[4], /not connected: Codex · Kimi/);
+  assert.match(lines[5], /fetched/);
+  for (const footer of lines.slice(2)) assert.ok(footer.startsWith(STAMP), `dim footer: ${footer}`);
+  assert.doesNotMatch(renderContent(data), /not logged in|API key not set/);
+
+  const all = renderContent({ ...data, all: true });
+  assert.match(all, /Codex.*\n.*not connected \(\/login openai-codex\)/);
+  assert.match(all, /Kimi.*\n.*not connected \(\/login kimi-coding\)/);
+  assert.doesNotMatch(all, /not connected: /);
+});
+
+test("nothing connected renders a single hint line", () => {
+  const data = {
+    blocks: [
+      { name: "Claude", status: "unconnected", hint: "/login anthropic" },
+      { name: "GLM", status: "unconnected", hint: "set ZAI_API_KEY or ZAI_CODING_CN_API_KEY" },
+    ],
+    fetchedAt: "2026-01-01T00:00:00Z",
+  };
+  const lines = renderContent(data).split("\n");
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /no providers connected — Claude: \/login anthropic · GLM: set ZAI_API_KEY or ZAI_CODING_CN_API_KEY/);
+});
+
+test("loader marks header-only providers as no plan data and missing logins as unconnected", async () => {
+  const load = createUsageLoader();
+  await withFetch(async () => json({}), async () => {
+    const data = await load(authContext({ anthropic: oauth() }));
+    const claude = data.blocks.find((block) => block.name === "Claude");
+    assert.equal(claude.status, "nodata");
+    const codex = data.blocks.find((block) => block.name === "Codex");
+    assert.equal(codex.status, "unconnected");
+    assert.equal(codex.hint, "/login openai-codex");
+    const glm = data.blocks.find((block) => block.name === "GLM");
+    assert.equal(glm.status, "unconnected");
+    assert.match(glm.hint, /ZAI_API_KEY/);
+    assert.doesNotMatch(JSON.stringify(data), /not logged in|API key not set/);
+    assert.match(renderContent(data), /Claude: no plan data/);
+    assert.match(renderContent(data), /no providers connected|not connected: Codex · Kimi · Grok · GLM/);
+  });
+});
+
+test("Grok without a plan reports no meters", async () => {
+  await withFetch(async (url) => json(String(url).endsWith("/settings") ? {} : { config: {} }), async () => {
+    const lines = await fetchXai(authContext({ xai: oauth("grok-token") }));
+    assert.deepEqual(lines, ["Grok"]);
+  });
 });
 
 test("loader caches sequential calls and deduplicates concurrent calls", async () => {

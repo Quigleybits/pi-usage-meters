@@ -11,12 +11,14 @@ export default function (pi) {
   pi.registerCommand("usage", {
     description: "Show subscription quota for connected providers",
     handler: async (args, ctx) => {
-      const arg = String(args ?? "").trim();
-      if (arg && arg !== "--refresh") {
-        ctx.ui.notify("Usage: /usage [--refresh]", "warning");
+      const flags = String(args ?? "").trim().split(/\s+/).filter(Boolean);
+      if (flags.some((flag) => flag !== "--refresh" && flag !== "--all")) {
+        ctx.ui.notify("Usage: /usage [--refresh] [--all]", "warning");
         return;
       }
-      pi.appendEntry("provider-usage", await loadUsage(ctx, arg === "--refresh"));
+      const data = await loadUsage(ctx, flags.includes("--refresh"));
+      // --all keeps the per-provider login hints as blocks instead of the one-line footer summary.
+      pi.appendEntry("provider-usage", flags.includes("--all") ? { ...data, all: true } : data);
     },
   });
 }

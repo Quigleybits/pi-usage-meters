@@ -126,7 +126,17 @@ const header = (name, plan) => {
   return safe ? `${name} (${safe})` : name;
 };
 
-const noAuth = (name, login) => [name, `  OAuth not logged in (/login ${login})`];
+// Thrown by a fetcher when the user holds no credential for that provider. fetchAll turns it into
+// a "not connected" status, which renders as part of one dim footer line — never as a block.
+export class NotConnected extends Error {
+  constructor(hint) {
+    super("not connected");
+    this.name = "NotConnected";
+    this.hint = hint;
+  }
+}
+
+const noAuth = (login) => new NotConnected(`/login ${login}`);
 
 async function readTextLimited(response) {
   const reader = response.body?.getReader();
@@ -238,7 +248,7 @@ const optionalJson = (url, token, headers) => getJson(url, token, headers, OPTIO
 
 export async function fetchAnthropic(ctx) {
   const token = await tokenFor(ctx, "anthropic");
-  if (!token) return noAuth("Claude", "anthropic");
+  if (!token) throw noAuth("anthropic");
   const headers = { "anthropic-beta": "oauth-2025-04-20" };
   const [usage, profile] = await Promise.all([
     getJson("https://api.anthropic.com/api/oauth/usage", token, headers),
@@ -277,7 +287,7 @@ export async function fetchAnthropic(ctx) {
 
 export async function fetchCodex(ctx) {
   const token = await tokenFor(ctx, "openai-codex");
-  if (!token) return noAuth("Codex", "openai-codex");
+  if (!token) throw noAuth("openai-codex");
   const accountId = codexAccountId(token);
   const accountHeader = accountId ? { "ChatGPT-Account-Id": accountId } : {};
   const usage = await getJson("https://chatgpt.com/backend-api/wham/usage", token, accountHeader);
@@ -309,7 +319,7 @@ export async function fetchCodex(ctx) {
 
 export async function fetchKimi(ctx) {
   const token = await tokenFor(ctx, "kimi-coding");
-  if (!token) return noAuth("Kimi", "kimi-coding");
+  if (!token) throw noAuth("kimi-coding");
   const usage = await getJson("https://api.kimi.com/coding/v1/usages", token);
   const level = clean(String(usage.user?.membership?.level ?? "").replace(/^LEVEL_/i, ""), 40).toLowerCase();
   const lines = [header("Kimi", level)];
@@ -331,7 +341,7 @@ function grokProductLabel(product) {
 
 export async function fetchXai(ctx) {
   const token = await tokenFor(ctx, "xai");
-  if (!token) return noAuth("Grok", "xai");
+  if (!token) throw noAuth("xai");
   // SuperGrok unified billing is weekly; bare /billing still returns the old monthly shape with 0s.
   const [billing, settings] = await Promise.all([
     getJson("https://cli-chat-proxy.grok.com/v1/billing?format=credits", token),
@@ -384,12 +394,10 @@ export async function fetchXai(ctx) {
     const used = Number(config.used?.val);
     if (Number.isFinite(limit) && limit > 0) {
       lines.push(line("Month (credits)", pct(used, limit), end, periodMs));
-    } else {
-      lines.push(plain(
-        "Month (credits)",
-        `${Number.isFinite(used) ? used.toLocaleString() : "?"} used (no limit reported)`,
-      ));
+    } else if (Number.isFinite(used)) {
+      lines.push(plain("Month (credits)", `${used.toLocaleString()} used (no limit reported)`));
     }
+    // Neither a limit nor a used figure means no plan on this account: the bare header reads as "no plan data".
   }
 
   const onDemandCap = Number(config.onDemandCap?.val);
@@ -424,7 +432,8 @@ const GLM_PROVIDERS = [
 
 async function glmAuthFor(ctx) {
   for (const config of GLM_PROVIDERS) {
-    const key = await apiKeyFor(ctx, config.provider);
+    // Older pi builds do not know zai-coding-cn; an unknown-provider throw simply means "no key here".
+    const key = await apiKeyFor(ctx, config.provider).catch(() => undefined);
     if (key) return { ...config, key };
   }
   return undefined;
@@ -432,9 +441,7 @@ async function glmAuthFor(ctx) {
 
 export async function fetchGlm(ctx) {
   const auth = await glmAuthFor(ctx);
-  if (!auth) {
-    return ["GLM", plain("error", "API key not set (ZAI_API_KEY or ZAI_CODING_CN_API_KEY)")];
-  }
+  if (!auth) throw new NotConnected("set ZAI_API_KEY or ZAI_CODING_CN_API_KEY");
   const res = await getJson(auth.endpoint, auth.key, {
     Authorization: auth.authorization(auth.key),
     "Accept-Language": "en-US,en",
@@ -484,7 +491,7 @@ const FETCHERS = [
   ["Codex", fetchCodex, "openai-codex"],
   ["Kimi", fetchKimi, "kimi-coding"],
   ["Grok", fetchXai, "xai"],
-  ["GLM", fetchGlm, "zai"],
+  ["GLM", fetchGlm, null], // API-key provider: no /login target
 ];
 
 function safeError(error) {
@@ -499,16 +506,21 @@ function safeError(error) {
   return "usage unavailable";
 }
 
+// Block shapes: { name, lines } when the provider is connected and reported at least one meter;
+// otherwise { name, status, hint | detail } with status unconnected | rejected | nodata | error.
+// Status blocks never render as blocks — renderContent folds them into one dim footer line.
 async function fetchAll(ctx) {
   return Promise.all(FETCHERS.map(async ([name, fetcher, login]) => {
     try {
-      return { name, lines: await fetcher(ctx) };
+      const lines = await fetcher(ctx);
+      if (lines.length <= 1) return { name, status: "nodata" };
+      return { name, lines };
     } catch (error) {
+      if (error instanceof NotConnected) return { name, status: "unconnected", hint: error.hint };
       if (error?.message === "HTTP 401") {
-        const hint = name === "GLM" ? "ZAI API key rejected" : `OAuth token rejected (/login ${login})`;
-        return { name, lines: [name, `  ${hint}`] };
+        return { name, status: "rejected", hint: login ? `login expired (/login ${login})` : "API key rejected" };
       }
-      return { name, lines: [name, plain("error", safeError(error))] };
+      return { name, status: "error", detail: safeError(error) };
     }
   }));
 }
@@ -532,16 +544,42 @@ export function createUsageLoader() {
   };
 }
 
+const dim = (text) => `${STAMP}${clean(text, MAX_RENDER_LINE)}${RESET}`;
+
 export function renderContent(data) {
-  const out = (Array.isArray(data?.blocks) ? data.blocks : []).slice(0, FETCHERS.length).flatMap((block) => {
+  const showAll = data?.all === true;
+  const out = [];
+  const unconnected = [];
+  const notes = [];
+  for (const block of (Array.isArray(data?.blocks) ? data.blocks : []).slice(0, FETCHERS.length)) {
     const name = clean(block?.name, 40);
-    const color = Object.hasOwn(COLORS, name) ? COLORS[name] : COLORS.Codex;
+    const color = Object.hasOwn(COLORS, name) ? COLORS[name] : "";
     const lines = Array.isArray(block?.lines) ? block.lines.slice(0, 20) : [];
-    return lines.map((value) => `${color}${clean(value, MAX_RENDER_LINE)}${RESET}`);
-  });
-  const fetched = new Date(data?.fetchedAt);
-  if (Number.isFinite(fetched.getTime())) {
-    out.push(`${STAMP}fetched ${fetched.toLocaleTimeString()}${RESET}`);
+    if (lines.length) {
+      out.push(...lines.map((value) => `${color}${clean(value, MAX_RENDER_LINE)}${RESET}`));
+      continue;
+    }
+    const status = clean(block?.status, 20);
+    const hint = clean(block?.hint, 80);
+    if (status === "unconnected") {
+      if (showAll) out.push(`${color}${name}${RESET}`, `${color}  not connected (${hint})${RESET}`);
+      else unconnected.push({ name, hint });
+    } else if (status === "rejected") {
+      notes.push(`${name}: ${hint || "credential rejected"}`);
+    } else if (status === "nodata") {
+      notes.push(`${name}: no plan data`);
+    } else if (status === "error") {
+      notes.push(`${name}: ${clean(block?.detail, 80) || "usage unavailable"}`);
+    }
   }
+  // Actionable notes (expired logins, errors) come first; the not-connected summary closes the footer.
+  if (unconnected.length && (out.length || notes.length)) {
+    notes.push(`not connected: ${unconnected.map((entry) => entry.name).join(" · ")}`);
+  } else if (unconnected.length) {
+    notes.push(`no providers connected — ${unconnected.map((entry) => `${entry.name}: ${entry.hint}`).join(" · ")}`);
+  }
+  out.push(...notes.map(dim));
+  const fetched = new Date(data?.fetchedAt);
+  if (Number.isFinite(fetched.getTime())) out.push(dim(`fetched ${fetched.toLocaleTimeString()}`));
   return out.join("\n");
 }

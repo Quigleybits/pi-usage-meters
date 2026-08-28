@@ -18,7 +18,9 @@ Try without installing:
 pi -e npm:pi-usage-meters
 ```
 
-Then run `/usage` in any pi session. Results are cached in memory for 60 seconds; use `/usage --refresh` to bypass the cache. No extension-specific configuration is needed — OAuth credentials come from pi's own auth store (`/login`) and refresh automatically. The GLM meter resolves either `zai` / `ZAI_API_KEY` or `zai-coding-cn` / `ZAI_CODING_CN_API_KEY` from the same auth registry; if both are configured, the existing global `zai` provider takes precedence. OAuth providers without login show a one-line hint.
+Then run `/usage` in any pi session. Results are cached in memory for 60 seconds; use `/usage --refresh` to bypass the cache. No extension-specific configuration is needed — OAuth credentials come from pi's own auth store (`/login`) and refresh automatically. The GLM meter resolves either `zai` / `ZAI_API_KEY` or `zai-coding-cn` / `ZAI_CODING_CN_API_KEY` from the same auth registry; if both are configured, the existing global `zai` provider takes precedence.
+
+Only providers you are connected to get a block. Everything else collapses into one dim footer line — `not connected: Codex · Kimi`, `Claude: login expired (/login anthropic)`, `Codex: timed out (8s)` — so an account you do not have never shows up as an error. `/usage --all` lists the per-provider login hints as blocks instead.
 
 ## Providers & endpoints
 
@@ -44,6 +46,7 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 ## Notes & caveats
 
 - These quota endpoints are **undocumented** and may change without notice; each provider fetch is isolated and fails soft.
+- A provider that stalls is cut off after 8 s and reported as `timed out (8s)` in the footer line; the other meters still render. A connected account with no quota windows (no active plan) shows as `no plan data`.
 - Codex banked-reset lookup currently sends `OpenAI-Beta: codex-1` and `originator: Codex Desktop`, matching the existing Codex client endpoint contract. Review this compatibility choice if OpenAI publishes an official replacement.
 - Grok SuperGrok usage is the shared weekly credit pool (`creditUsagePercent`), with optional per-product split (Build/Chat/Imagine). Legacy monthly credit totals remain as a fallback if the weekly payload is absent.
 - Grok usage-reset credits are served only to the grok.com web app (a cookie-authenticated Connect RPC, `prod_mc_billing.ConsumerUiSvc/GetRemainingResets`); the OAuth-reachable billing API never reports them. The meter therefore **detects redeemed resets by inference**: within one weekly period the pool percentage only climbs, so a drop of 5+ points while the period is unchanged is reported as `Reset used 21 Aug (35% → 5%)`. This needs a small state file (see Privacy). It is inference — an xAI-side recomputation could in theory produce the same signature. If xAI ever exposes explicit counts (`resetsRemaining`), they are rendered as `Resets N available` and take precedence in spirit. `scripts/probe-grok-billing.mjs` (repo only, not shipped) dumps the sanitized payload for re-checking.
