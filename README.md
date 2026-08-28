@@ -1,6 +1,6 @@
 # pi-usage-meters
 
-A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're connected to** — one compact, colour-coded block instead of five dashboards. Claude, Codex, Kimi, and Grok authenticate via pi's OAuth; GLM uses either `ZAI_API_KEY` (`zai`) or `ZAI_CODING_CN_API_KEY` (`zai-coding-cn`).
+A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're connected to** — one compact, colour-coded block instead of a dashboard per provider. Claude, Codex, Kimi, and Grok authenticate via pi's OAuth; GLM uses either `ZAI_API_KEY` (`zai`) or `ZAI_CODING_CN_API_KEY` (`zai-coding-cn`); MiniMax token plans use `MINIMAX_API_KEY` / `MINIMAX_CN_API_KEY`; DeepSeek balances use `DEEPSEEK_API_KEY`.
 
 ![Colour-coded usage meters for Claude, Codex, Kimi, Grok, and GLM (real fixture data)](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/main/assets/pi-usage.png)
 
@@ -31,10 +31,12 @@ Only providers you are connected to get a block. Everything else collapses into 
 | Kimi (`kimi-coding`) | membership level from usage payload | `api.kimi.com/coding/v1/usages` |
 | GLM (`zai`, `zai-coding-cn`) | plan level from usage payload | Global: `api.z.ai/api/monitor/usage/quota/limit`; China: `open.bigmodel.cn/api/monitor/usage/quota/limit` (coding-plan credit windows: 5h session + monthly; session/month split by reset horizon) |
 | Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly SuperGrok pool; monthly shape kept as fallback) + redeemed-reset detection |
+| MiniMax (`minimax`, `minimax-cn`) | token plan vs pay-as-you-go from the key type | Global: `api.minimax.io/v1/token_plan/remains`; China: `api.minimaxi.com/v1/token_plan/remains` (5h session + weekly window per model family, same contract as the official MiniMax CLI); `sk-api-` keys query `/account/query_balance` instead |
+| DeepSeek (`deepseek`) | pay-as-you-go | `api.deepseek.com/user/balance` (documented; balance only, no quota windows) |
 
 ## Privacy & security
 
-- OAuth access tokens come from **pi's auth store only** (`ctx.modelRegistry.getProviderAuth`). The GLM meter resolves `zai` and `zai-coding-cn` API keys the same way and sends each key **only** to its matching issuer (`api.z.ai` or `open.bigmodel.cn`) — never to another provider's endpoint.
+- OAuth access tokens come from **pi's auth store only** (`ctx.modelRegistry.getProviderAuth`). The GLM meter resolves `zai` and `zai-coding-cn` API keys the same way and sends each key **only** to its matching issuer (`api.z.ai` or `open.bigmodel.cn`) — never to another provider's endpoint. The same holds for MiniMax (`api.minimax.io` / `api.minimaxi.com`, the hosts pi already sends those keys to) and DeepSeek (`api.deepseek.com`).
 - The Grok reset-detection feature persists a small state file at `~/.pi/agent/usage-meters-state.json` (override: `PI_USAGE_METERS_STATE`). It contains only the last-seen Grok weekly period boundaries, pool percentage, and a timestamp — no tokens, no secrets, no other providers. It is written atomically, deletable at any time, and never leaves the machine.
 - Codex's non-secret account ID is decoded from the OAuth JWT; this package never opens `~/.pi/agent/auth.json`.
 - Credentials are used solely in the `Authorization` header on the provider's own HTTPS quota endpoints. OAuth providers and global Z.AI use `Bearer`; Z.AI Coding CN uses the raw API-key value required by its endpoint. Credentials are never logged, rendered, or written into session entries. Remote error bodies are not persisted.
@@ -47,6 +49,8 @@ Only providers you are connected to get a block. Everything else collapses into 
 
 - These quota endpoints are **undocumented** and may change without notice; each provider fetch is isolated and fails soft.
 - A provider that stalls is cut off after 8 s and reported as `timed out (8s)` in the footer line; the other meters still render. A connected account with no quota windows (no active plan) shows as `no plan data`.
+- MiniMax's `*_usage_count` fields historically meant *remaining*; when the payload carries `*_remaining_percent` the meter uses it to pick the right reading (mirroring the official MiniMax CLI), and a weekly boost (`weekly_boost_permille`) is applied the same way. Models flagged "not in plan" are skipped. The API reports auth failures in-band (HTTP 200, `status_code` 1004), which the meter maps to `API key rejected`.
+- GitHub Copilot premium-request meters are not supported yet: pi's extension API exposes only the Copilot session token, while `api.github.com/copilot_internal/user` needs the GitHub OAuth token that pi keeps private. This needs an upstream pi API before it can be added safely.
 - Codex banked-reset lookup currently sends `OpenAI-Beta: codex-1` and `originator: Codex Desktop`, matching the existing Codex client endpoint contract. Review this compatibility choice if OpenAI publishes an official replacement.
 - Grok SuperGrok usage is the shared weekly credit pool (`creditUsagePercent`), with optional per-product split (Build/Chat/Imagine). Legacy monthly credit totals remain as a fallback if the weekly payload is absent.
 - Grok usage-reset credits are served only to the grok.com web app (a cookie-authenticated Connect RPC, `prod_mc_billing.ConsumerUiSvc/GetRemainingResets`); the OAuth-reachable billing API never reports them. The meter therefore **detects redeemed resets by inference**: within one weekly period the pool percentage only climbs, so a drop of 5+ points while the period is unchanged is reported as `Reset used 21 Aug (35% → 5%)`. This needs a small state file (see Privacy). It is inference — an xAI-side recomputation could in theory produce the same signature. If xAI ever exposes explicit counts (`resetsRemaining`), they are rendered as `Resets N available` and take precedence in spirit. `scripts/probe-grok-billing.mjs` (repo only, not shipped) dumps the sanitized payload for re-checking.

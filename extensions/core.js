@@ -50,6 +50,8 @@ export const COLORS = {
   Kimi: rgb("#4fa8ff"),
   Grok: rgb("#8a8a8a"),
   GLM: rgb("#9b8cff"),
+  MiniMax: rgb("#e0457b"),
+  DeepSeek: rgb("#5b6cff"),
 };
 
 export function clean(value, max = 200) {
@@ -486,19 +488,117 @@ export async function fetchGlm(ctx) {
   return lines;
 }
 
+// MiniMax token plan: the endpoint the official MiniMax CLI uses (MiniMax-AI/cli src/client/endpoints.ts),
+// on the same host pi sends the key to. The API answers HTTP 200 even on auth failure and signals it
+// in base_resp.status_code (1004). `*_usage_count` historically meant *remaining*; newer payloads add
+// `*_remaining_percent`, which decides the interpretation (mirrors the CLI's resolveQuotaCounts).
+const MINIMAX_PROVIDERS = [
+  { provider: "minimax", host: "https://api.minimax.io" },
+  { provider: "minimax-cn", host: "https://api.minimaxi.com" },
+];
+
+function minimaxWindow(reported, total, remainingPercent, boostPermille) {
+  const t = Number(total);
+  if (!Number.isFinite(t) || t <= 0) return undefined;
+  const r = Number(reported);
+  const percent = Number(remainingPercent);
+  const boost = Number(boostPermille) > 0 ? Number(boostPermille) / 1000 : 1;
+  let remaining = Number.isFinite(r) && r >= 0 && r <= t ? r : NaN; // legacy reading: a remaining count
+  if (Number.isFinite(percent) && Number.isFinite(remaining)) {
+    const asRemaining = Math.abs((remaining / t) * 100 - percent);
+    const asUsed = Math.abs(((t - remaining) / t) * 100 - percent);
+    if (Math.min(asRemaining, asUsed) > 1) remaining = NaN; // neither reading matches: counts unknown
+    else if (asUsed < asRemaining) remaining = t - remaining;
+  }
+  const remainingPct = Number.isFinite(percent) ? percent * boost
+    : Number.isFinite(remaining) ? (remaining / t) * 100 * boost : NaN;
+  if (!Number.isFinite(remainingPct)) return undefined;
+  return {
+    usedPct: clampPct(100 - remainingPct),
+    counts: Number.isFinite(remaining) ? ` · ${(t - remaining).toLocaleString()}/${t.toLocaleString()}` : "",
+  };
+}
+
+export async function fetchMinimax(ctx) {
+  let auth;
+  for (const config of MINIMAX_PROVIDERS) {
+    const key = await apiKeyFor(ctx, config.provider).catch(() => undefined);
+    if (key) {
+      auth = { ...config, key };
+      break;
+    }
+  }
+  if (!auth) throw new NotConnected("set MINIMAX_API_KEY or MINIMAX_CN_API_KEY");
+  // sk-api- keys are pay-as-you-go secret keys: like the CLI, query the account balance instead of a plan.
+  const payg = auth.key.startsWith("sk-api-");
+  const res = await getJson(`${auth.host}${payg ? "/account/query_balance" : "/v1/token_plan/remains"}`, auth.key);
+  const code = Number(res?.base_resp?.status_code ?? 0);
+  if (code === 1004) throw new Error("HTTP 401"); // in-band auth failure → "API key rejected"
+  if (code !== 0) throw new Error(`provider status ${code}`);
+  const lines = [header("MiniMax", payg ? "pay-as-you-go" : "token plan")];
+  if (payg) {
+    const amount = clean(res?.available_amount, 20);
+    if (amount) lines.push(plain("Balance", `${amount} available`));
+    return lines;
+  }
+  const entries = Array.isArray(res?.model_remains) ? res.model_remains.slice(0, 6) : [];
+  const notInPlan = (m) => Number(m?.current_interval_total_count) === 0 && Number(m?.current_weekly_total_count) === 0
+    && Number(m?.current_interval_status) === 3 && Number(m?.current_weekly_status) === 3;
+  const primary = entries.find((m) => /^MiniMax-M/i.test(String(m?.model_name ?? ""))) ?? entries[0];
+  for (const m of entries) {
+    if (!m || typeof m !== "object" || notInPlan(m)) continue;
+    const interval = minimaxWindow(m.current_interval_usage_count, m.current_interval_total_count, m.current_interval_remaining_percent);
+    if (m === primary) {
+      const windowMs = Number(m.end_time) - Number(m.start_time);
+      if (interval) lines.push(line(windowLabel(windowMs), interval.usedPct, Number(m.end_time), windowMs) + interval.counts);
+      const weekly = Number(m.current_weekly_status) === 3 // 3 = weekly quota unlimited
+        ? undefined
+        : minimaxWindow(m.current_weekly_usage_count, m.current_weekly_total_count, m.current_weekly_remaining_percent, m.weekly_boost_permille);
+      if (weekly) {
+        const weekMs = Number(m.weekly_end_time) - Number(m.weekly_start_time);
+        lines.push(line("Week", weekly.usedPct, Number(m.weekly_end_time), weekMs > 0 ? weekMs : D7) + weekly.counts);
+      }
+    } else if (interval) {
+      lines.push(line(clean(m.model_name, 20) || "model", interval.usedPct));
+    }
+  }
+  return lines;
+}
+
+// DeepSeek is pay-as-you-go: the documented balance endpoint (api-docs.deepseek.com/api/get-user-balance).
+export async function fetchDeepseek(ctx) {
+  const key = await apiKeyFor(ctx, "deepseek");
+  if (!key) throw new NotConnected("set DEEPSEEK_API_KEY");
+  const res = await getJson("https://api.deepseek.com/user/balance", key);
+  const lines = [header("DeepSeek", res?.is_available === false ? "balance exhausted" : "pay-as-you-go")];
+  for (const info of (Array.isArray(res?.balance_infos) ? res.balance_infos : []).slice(0, 4)) {
+    const total = clean(info?.total_balance, 20);
+    if (!total) continue;
+    const parts = [`${total} ${clean(info?.currency, 8) || "?"}`];
+    const granted = clean(info?.granted_balance, 20);
+    const topped = clean(info?.topped_up_balance, 20);
+    if (Number(granted) > 0) parts.push(`granted ${granted}`);
+    if (Number(topped) > 0) parts.push(`topped up ${topped}`);
+    lines.push(plain("Balance", parts.join(" · ")));
+  }
+  return lines;
+}
+
 const FETCHERS = [
   ["Claude", fetchAnthropic, "anthropic"],
   ["Codex", fetchCodex, "openai-codex"],
   ["Kimi", fetchKimi, "kimi-coding"],
   ["Grok", fetchXai, "xai"],
-  ["GLM", fetchGlm, null], // API-key provider: no /login target
+  ["GLM", fetchGlm, null], // API-key providers carry no /login target
+  ["MiniMax", fetchMinimax, null],
+  ["DeepSeek", fetchDeepseek, null],
 ];
 
 function safeError(error) {
   const message = String(error?.message ?? "");
   const timeout = message.match(/^timed out after (\d+)ms$/);
   if (timeout) return `timed out (${Math.round(Number(timeout[1]) / 1000)}s)`;
-  if (/^(HTTP \d{3}|response too large|non-JSON response)$/.test(message)) return message;
+  if (/^(HTTP \d{3}|provider status \d{1,6}|response too large|non-JSON response)$/.test(message)) return message;
   if (message === "fetch failed") {
     const code = String(error?.cause?.code ?? "");
     return /^[A-Z0-9_]{2,20}$/.test(code) ? `network error (${code})` : "network error";

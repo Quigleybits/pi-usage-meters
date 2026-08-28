@@ -12,8 +12,10 @@ import {
   createUsageLoader,
   fetchAnthropic,
   fetchCodex,
+  fetchDeepseek,
   fetchGlm,
   fetchKimi,
+  fetchMinimax,
   fetchXai,
   getJson,
   line,
@@ -482,6 +484,125 @@ test("loader marks header-only providers as no plan data and missing logins as u
   });
 });
 
+// Official CLI fixture (MiniMax-AI/cli test/fixtures/quota-response.json), legacy semantics: usage_count = remaining.
+const minimaxFixture = (extra = {}) => ({
+  base_resp: { status_code: 0, status_msg: "success" },
+  model_remains: [
+    {
+      model_name: "MiniMax-M*",
+      start_time: Date.now() - 2 * 3600e3,
+      end_time: Date.now() + 3 * 3600e3,
+      remains_time: 3 * 3600e3,
+      current_interval_total_count: 1500,
+      current_interval_usage_count: 228,
+      current_weekly_total_count: 0,
+      current_weekly_usage_count: 0,
+      weekly_start_time: Date.now() - 4 * 86400e3,
+      weekly_end_time: Date.now() + 3 * 86400e3,
+      weekly_remains_time: 3 * 86400e3,
+      ...extra,
+    },
+    {
+      model_name: "speech-hd",
+      start_time: Date.now() - 3600e3,
+      end_time: Date.now() + 23 * 3600e3,
+      remains_time: 23 * 3600e3,
+      current_interval_total_count: 9000,
+      current_interval_usage_count: 9000,
+      current_weekly_total_count: 63000,
+      current_weekly_usage_count: 63000,
+    },
+    {
+      model_name: "video-01",
+      current_interval_total_count: 0,
+      current_weekly_total_count: 0,
+      current_interval_status: 3,
+      current_weekly_status: 3,
+    },
+  ],
+});
+
+test("MiniMax parses the official fixture with legacy remaining-count semantics", async () => {
+  const ctx = authContext({ minimax: { source: "apiKey", auth: { apiKey: "mm-key" } } });
+  await withFetch(async (url, init) => {
+    assert.equal(String(url), "https://api.minimax.io/v1/token_plan/remains");
+    assert.equal(init.headers.Authorization, "Bearer mm-key");
+    return json(minimaxFixture());
+  }, async () => {
+    const lines = await fetchMinimax(ctx);
+    assert.equal(lines[0], "MiniMax (token plan)");
+    assert.match(lines[1], /Session \(5h\).*85%.*reset.*1,272\/1,500/);
+    assert.match(lines[2], /speech-hd\s+░+\s+0%/);
+    assert.equal(lines.length, 3); // weekly total 0 → no Week line; video-01 not in plan → skipped
+  });
+});
+
+test("MiniMax uses remaining_percent to disambiguate usage_count and honours the weekly boost", async () => {
+  const ctx = authContext({ "minimax-cn": { source: "apiKey", auth: { apiKey: "mm-cn-key" } } });
+  await withFetch(async (url) => {
+    assert.equal(String(url), "https://api.minimaxi.com/v1/token_plan/remains");
+    return json(minimaxFixture({
+      current_interval_remaining_percent: 84.8, // 228 now reads as *used*
+      current_weekly_total_count: 10000,
+      current_weekly_usage_count: 2500,
+      current_weekly_remaining_percent: 75,
+      weekly_boost_permille: 1200,
+    }));
+  }, async () => {
+    const lines = await fetchMinimax(ctx);
+    assert.match(lines[1], /Session \(5h\).*15%.*228\/1,500/);
+    assert.match(lines[2], /Week\s+█░{9}\s+10%.*reset.*2,500\/10,000/); // 75% × 1.2 = 90% remaining → 10% used
+  });
+});
+
+test("MiniMax in-band auth failure, pay-as-you-go keys, and missing keys", async () => {
+  const load = createUsageLoader();
+  const ctx = authContext({ minimax: { source: "apiKey", auth: { apiKey: "mm-key" } } });
+  await withFetch(async () => json({ base_resp: { status_code: 1004, status_msg: "login fail: secret" } }), async () => {
+    const block = (await load(ctx)).blocks.find((entry) => entry.name === "MiniMax");
+    assert.equal(block.status, "rejected");
+    assert.equal(block.hint, "API key rejected");
+    assert.doesNotMatch(JSON.stringify(block), /secret/);
+  });
+
+  const payg = authContext({ minimax: { source: "apiKey", auth: { apiKey: "sk-api-123" } } });
+  await withFetch(async (url) => {
+    assert.equal(String(url), "https://api.minimax.io/account/query_balance");
+    return json({ base_resp: { status_code: 0 }, available_amount: "12.50", cash_balance: "10.00" });
+  }, async () => {
+    const lines = await fetchMinimax(payg);
+    assert.equal(lines[0], "MiniMax (pay-as-you-go)");
+    assert.match(lines[1], /Balance\s+12\.50 available/);
+  });
+
+  await assert.rejects(
+    fetchMinimax(authContext({})),
+    (error) => error.name === "NotConnected" && /MINIMAX_API_KEY or MINIMAX_CN_API_KEY/.test(error.hint),
+  );
+});
+
+test("DeepSeek renders the documented balance payload and hides zero components", async () => {
+  const ctx = authContext({ deepseek: { source: "apiKey", auth: { apiKey: "ds-key" } } });
+  await withFetch(async (url, init) => {
+    assert.equal(String(url), "https://api.deepseek.com/user/balance");
+    assert.equal(init.headers.Authorization, "Bearer ds-key");
+    return json({
+      is_available: true,
+      balance_infos: [{ currency: "CNY", total_balance: "110.00", granted_balance: "10.00", topped_up_balance: "100.00" }],
+    });
+  }, async () => {
+    const lines = await fetchDeepseek(ctx);
+    assert.equal(lines[0], "DeepSeek (pay-as-you-go)");
+    assert.match(lines[1], /Balance\s+110\.00 CNY · granted 10\.00 · topped up 100\.00/);
+  });
+  await withFetch(async () => json({ is_available: false, balance_infos: [{ currency: "USD", total_balance: "0.00", granted_balance: "0.00", topped_up_balance: "0.00" }] }), async () => {
+    const lines = await fetchDeepseek(ctx);
+    assert.equal(lines[0], "DeepSeek (balance exhausted)");
+    assert.match(lines[1], /Balance\s+0\.00 USD$/);
+  });
+  await assert.rejects(fetchDeepseek(authContext({})), (error) => error.name === "NotConnected" && /DEEPSEEK_API_KEY/.test(error.hint));
+});
+
 test("Grok without a plan reports no meters", async () => {
   await withFetch(async (url) => json(String(url).endsWith("/settings") ? {} : { config: {} }), async () => {
     const lines = await fetchXai(authContext({ xai: oauth("grok-token") }));
@@ -503,9 +624,9 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   const load = createUsageLoader();
   const [a, b] = await Promise.all([load(ctx), load(ctx)]);
   assert.equal(a, b);
-  assert.equal(resolutions, 6);
+  assert.equal(resolutions, 9); // 4 OAuth + zai/zai-coding-cn + minimax/minimax-cn + deepseek
   assert.equal(await load(ctx), a);
-  assert.equal(resolutions, 6);
+  assert.equal(resolutions, 9);
 });
 
 test("package manifest limits files and includes community metadata", () => {
