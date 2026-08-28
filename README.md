@@ -1,6 +1,6 @@
 # pi-usage-meters
 
-A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're connected to** — one compact, colour-coded block instead of five dashboards. Claude, Codex, Kimi, and Grok authenticate via pi's OAuth; GLM uses your `ZAI_API_KEY`.
+A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're connected to** — one compact, colour-coded block instead of five dashboards. Claude, Codex, Kimi, and Grok authenticate via pi's OAuth; GLM uses either `ZAI_API_KEY` (`zai`) or `ZAI_CODING_CN_API_KEY` (`zai-coding-cn`).
 
 ![Colour-coded usage meters for Claude, Codex, Kimi, Grok, and GLM (real fixture data)](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/main/assets/pi-usage.png)
 
@@ -18,7 +18,7 @@ Try without installing:
 pi -e npm:pi-usage-meters
 ```
 
-Then run `/usage` in any pi session. Results are cached in memory for 60 seconds; use `/usage --refresh` to bypass the cache. No configuration needed — OAuth credentials come from pi's own auth store (`/login`) and refresh automatically; the GLM meter uses your `ZAI_API_KEY` (any auth source pi resolves for `zai`). OAuth providers without login show a one-line hint.
+Then run `/usage` in any pi session. Results are cached in memory for 60 seconds; use `/usage --refresh` to bypass the cache. No extension-specific configuration is needed — OAuth credentials come from pi's own auth store (`/login`) and refresh automatically. The GLM meter resolves either `zai` / `ZAI_API_KEY` or `zai-coding-cn` / `ZAI_CODING_CN_API_KEY` from the same auth registry; if both are configured, the existing global `zai` provider takes precedence. OAuth providers without login show a one-line hint.
 
 ## Providers & endpoints
 
@@ -27,15 +27,15 @@ Then run `/usage` in any pi session. Results are cached in memory for 60 seconds
 | Claude (`anthropic`) | `api.anthropic.com/api/oauth/profile` | `api.anthropic.com/api/oauth/usage` |
 | Codex (`openai-codex`) | plan from usage payload | `chatgpt.com/backend-api/wham/usage` + `.../rate-limit-reset-credits` |
 | Kimi (`kimi-coding`) | membership level from usage payload | `api.kimi.com/coding/v1/usages` |
-| GLM (`zai`) | plan level from usage payload | `api.z.ai/api/monitor/usage/quota/limit` (coding-plan credit windows: 5h session + monthly; session/month split by reset horizon) |
+| GLM (`zai`, `zai-coding-cn`) | plan level from usage payload | Global: `api.z.ai/api/monitor/usage/quota/limit`; China: `open.bigmodel.cn/api/monitor/usage/quota/limit` (coding-plan credit windows: 5h session + monthly; session/month split by reset horizon) |
 | Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly SuperGrok pool; monthly shape kept as fallback) + redeemed-reset detection |
 
 ## Privacy & security
 
-- OAuth access tokens come from **pi's auth store only** (`ctx.modelRegistry.getProviderAuth`). The GLM meter resolves your `zai` API key the same way and sends it **only** to `api.z.ai` (the key's own issuer) — never to any other provider's endpoint.
+- OAuth access tokens come from **pi's auth store only** (`ctx.modelRegistry.getProviderAuth`). The GLM meter resolves `zai` and `zai-coding-cn` API keys the same way and sends each key **only** to its matching issuer (`api.z.ai` or `open.bigmodel.cn`) — never to another provider's endpoint.
 - The Grok reset-detection feature persists a small state file at `~/.pi/agent/usage-meters-state.json` (override: `PI_USAGE_METERS_STATE`). It contains only the last-seen Grok weekly period boundaries, pool percentage, and a timestamp — no tokens, no secrets, no other providers. It is written atomically, deletable at any time, and never leaves the machine.
 - Codex's non-secret account ID is decoded from the OAuth JWT; this package never opens `~/.pi/agent/auth.json`.
-- Tokens are used solely as `Authorization: Bearer` on the provider's own HTTPS quota endpoints. They are never logged, rendered, or written into session entries. Remote error bodies are not persisted.
+- Credentials are used solely in the `Authorization` header on the provider's own HTTPS quota endpoints. OAuth providers and global Z.AI use `Bearer`; Z.AI Coding CN uses the raw API-key value required by its endpoint. Credentials are never logged, rendered, or written into session entries. Remote error bodies are not persisted.
 - API responses are size-limited; untrusted strings are length-limited and stripped of terminal controls, ANSI, and bidirectional-text controls both before storage and again at render time.
 - Each provider fetch is isolated: one failure never blanks the others.
 
