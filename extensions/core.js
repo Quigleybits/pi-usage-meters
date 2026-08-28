@@ -1,4 +1,4 @@
-const TIMEOUT_MS = 12_000;
+const TIMEOUT_MS = 8_000;
 const OPTIONAL_TIMEOUT_MS = 2_500;
 const CACHE_MS = 60_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -46,7 +46,7 @@ const rgb = (hex) => {
 
 export const COLORS = {
   Claude: rgb("#d77757"),
-  Codex: rgb("#ffffff"),
+  Codex: "", // terminal default foreground: pure white vanishes on light themes
   Kimi: rgb("#4fa8ff"),
   Grok: rgb("#8a8a8a"),
   GLM: rgb("#9b8cff"),
@@ -156,6 +156,7 @@ export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) 
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
+      redirect: "error", // a quota endpoint never redirects; never carry a credential to a second host
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...headers },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -488,7 +489,9 @@ const FETCHERS = [
 
 function safeError(error) {
   const message = String(error?.message ?? "");
-  if (/^(HTTP \d{3}|timed out after \d+ms|response too large|non-JSON response)$/.test(message)) return message;
+  const timeout = message.match(/^timed out after (\d+)ms$/);
+  if (timeout) return `timed out (${Math.round(Number(timeout[1]) / 1000)}s)`;
+  if (/^(HTTP \d{3}|response too large|non-JSON response)$/.test(message)) return message;
   if (message === "fetch failed") {
     const code = String(error?.cause?.code ?? "");
     return /^[A-Z0-9_]{2,20}$/.test(code) ? `network error (${code})` : "network error";

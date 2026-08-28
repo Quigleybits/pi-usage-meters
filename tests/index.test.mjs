@@ -393,6 +393,32 @@ test("network failures surface as network error with system code", async () => {
   });
 });
 
+test("fetches refuse redirects and a stalled provider reports the 8 s budget", async () => {
+  let init;
+  await withFetch(async (_url, options) => {
+    init = options;
+    return json({});
+  }, () => getJson("https://example.test", "token"));
+  assert.equal(init.redirect, "error");
+
+  const load = createUsageLoader();
+  await withFetch(async () => {
+    const error = new Error("aborted");
+    error.name = "AbortError";
+    throw error;
+  }, async () => {
+    const data = await load(authContext({ anthropic: oauth() }));
+    assert.match(JSON.stringify(data), /timed out \(8s\)/);
+    assert.doesNotMatch(JSON.stringify(data), /8000ms/);
+  });
+});
+
+test("Codex block uses the terminal's default foreground", () => {
+  const rendered = renderContent({ blocks: [{ name: "Codex", lines: ["Codex"] }] });
+  assert.doesNotMatch(rendered, /38;2;255;255;255/);
+  assert.match(renderContent({ blocks: [{ name: "Claude", lines: ["Claude"] }] }), /38;2;215;119;87/);
+});
+
 test("loader caches sequential calls and deduplicates concurrent calls", async () => {
   let resolutions = 0;
   const ctx = {
