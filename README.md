@@ -29,7 +29,7 @@ Only providers you are connected to get a block. Everything else collapses into 
 | Claude (`anthropic`) | `api.anthropic.com/api/oauth/profile` | `api.anthropic.com/api/oauth/usage` |
 | Codex (`openai-codex`) | plan from usage payload | `chatgpt.com/backend-api/wham/usage` + `.../rate-limit-reset-credits` |
 | Kimi (`kimi-coding`) | membership level from usage payload | `api.kimi.com/coding/v1/usages` |
-| GLM (`zai`, `zai-coding-cn`) | plan level from usage payload | Global: `api.z.ai/api/monitor/usage/quota/limit`; China: `open.bigmodel.cn/api/monitor/usage/quota/limit` (coding-plan credit windows: 5h session + monthly; session/month split by reset horizon) |
+| GLM (`zai`, `zai-coding-cn`) | plan level from usage payload | Global: `api.z.ai/api/monitor/usage/quota/limit`; China: `open.bigmodel.cn/api/monitor/usage/quota/limit` (coding-plan windows: 5h session plus weekly or monthly, classified from the payload's `unit`/`number`; an explicit 7-day window renders as `Week`) |
 | Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly SuperGrok pool; monthly shape kept as fallback) + redeemed-reset detection |
 | MiniMax (`minimax`, `minimax-cn`) | token plan vs pay-as-you-go from the key type | Global: `api.minimax.io/v1/token_plan/remains`; China: `api.minimaxi.com/v1/token_plan/remains` (5h session + weekly window per model family, same contract as the official MiniMax CLI); `sk-api-` keys query `/account/query_balance` instead |
 | DeepSeek (`deepseek`) | pay-as-you-go | `api.deepseek.com/user/balance` (documented; balance only, no quota windows) |
@@ -48,7 +48,7 @@ Only providers you are connected to get a block. Everything else collapses into 
 ## Notes & caveats
 
 - These quota endpoints are **undocumented** and may change without notice; each provider fetch is isolated and fails soft.
-- A provider that stalls is cut off after 8 s and reported as `timed out (8s)` in the footer line; the other meters still render. A connected account with no quota windows (no active plan) shows as `no plan data`.
+- A provider that stalls is cut off after 8 s — one budget per provider, optional follow-up calls included — and reported as `timed out (8s)` in the footer line; the other meters still render. A connected account with no quota windows (no active plan) shows as `no plan data`.
 - MiniMax's `*_usage_count` fields historically meant *remaining*; when the payload carries `*_remaining_percent` the meter uses it to pick the right reading (mirroring the official MiniMax CLI), and a weekly boost (`weekly_boost_permille`) is applied the same way. Models flagged "not in plan" are skipped. The API reports auth failures in-band (HTTP 200, `status_code` 1004), which the meter maps to `API key rejected`.
 - GitHub Copilot premium-request meters are not supported yet: pi's extension API exposes only the Copilot session token, while `api.github.com/copilot_internal/user` needs the GitHub OAuth token that pi keeps private. This needs an upstream pi API before it can be added safely.
 - Codex banked-reset lookup currently sends `OpenAI-Beta: codex-1` and `originator: Codex Desktop`, matching the existing Codex client endpoint contract. Review this compatibility choice if OpenAI publishes an official replacement.

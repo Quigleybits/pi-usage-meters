@@ -603,6 +603,89 @@ test("DeepSeek renders the documented balance payload and hides zero components"
   await assert.rejects(fetchDeepseek(authContext({})), (error) => error.name === "NotConnected" && /DEEPSEEK_API_KEY/.test(error.hint));
 });
 
+test("MiniMax renders percent-only windows on zero-total time-based plans", async () => {
+  const ctx = authContext({ minimax: { source: "apiKey", auth: { apiKey: "mm-key" } } });
+  await withFetch(async () => json({
+    base_resp: { status_code: 0 },
+    model_remains: [{
+      model_name: "MiniMax-M*",
+      start_time: Date.now() - 3600e3,
+      end_time: Date.now() + 4 * 3600e3,
+      current_interval_total_count: 0,
+      current_interval_usage_count: 0,
+      current_interval_remaining_percent: 61,
+      current_interval_status: 1,
+      current_weekly_total_count: 0,
+      current_weekly_usage_count: 0,
+      current_weekly_remaining_percent: 92,
+      current_weekly_status: 1,
+      weekly_start_time: Date.now() - 86400e3,
+      weekly_end_time: Date.now() + 6 * 86400e3,
+    }],
+  }), async () => {
+    const lines = await fetchMinimax(ctx);
+    assert.equal(lines.length, 3);
+    assert.match(lines[1], /Session \(5h\)\s+████░{6}\s+39% reset/);
+    assert.doesNotMatch(lines[1], /\//); // no counts without a usable total
+    assert.match(lines[2], /Week\s+█░{9}\s+8% reset/);
+  });
+});
+
+test("GLM labels explicit seven-day windows as Week, not Month", async () => {
+  const ctx = authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } });
+  await withFetch(async () => json({
+    code: 200,
+    data: {
+      level: "pro",
+      limits: [
+        { type: "TOKENS_LIMIT", unit: 5, number: 1, percentage: 12, nextResetTime: Date.now() + 2 * 86400e3 },
+        { type: "CREDIT_LIMIT", unit: 5, number: 1, usage: 700, currentValue: 70, percentage: 10, nextResetTime: Date.now() + 2 * 86400e3 },
+        { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 40, nextResetTime: Date.now() + 20 * 86400e3 },
+      ],
+    },
+  }), async () => {
+    const lines = await fetchGlm(ctx);
+    assert.match(lines[1], /Week \(tokens\).*12%/);
+    assert.match(lines[2], /Week \(credits\).*10%.*70\/700/);
+    assert.match(lines[3], /Month \(tokens\).*40%/);
+  });
+});
+
+test("Codex keeps its optional banked-reset lookup inside the provider budget", async () => {
+  let now = 1_000_000;
+  const clock = () => now;
+  const ctx = authContext({ "openai-codex": oauth(jwt()) });
+  let optionalCalls = 0;
+  let elapsedAfterPrimary = 7_900;
+  const usage = {
+    rate_limit: { primary_window: { limit_window_seconds: 18000, used_percent: 10, reset_at: 1786500000 } },
+    rate_limit_reset_credits: { available_count: 2 },
+  };
+  await withFetch(async (url, init) => {
+    if (String(url).endsWith("rate-limit-reset-credits")) {
+      optionalCalls += 1;
+      return new Promise((_, reject) => init.signal.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      }));
+    }
+    now += elapsedAfterPrimary; // the primary call consumed almost the whole 8 s budget
+    return json(usage);
+  }, async () => {
+    const started = Date.now();
+    const lines = await fetchCodex(ctx, clock);
+    assert.ok(Date.now() - started < 1_500, "the follow-up must be cut to the remaining budget, not its full 2.5 s");
+    assert.equal(optionalCalls, 1);
+    assert.match(lines.join("\n"), /Banked resets\s+●●$/m);
+
+    elapsedAfterPrimary = 8_100; // budget already spent: the follow-up is skipped entirely
+    const skipped = await fetchCodex(ctx, clock);
+    assert.equal(optionalCalls, 1);
+    assert.match(skipped.join("\n"), /Banked resets\s+●●$/m);
+  });
+});
+
 test("Grok without a plan reports no meters", async () => {
   await withFetch(async (url) => json(String(url).endsWith("/settings") ? {} : { config: {} }), async () => {
     const lines = await fetchXai(authContext({ xai: oauth("grok-token") }));

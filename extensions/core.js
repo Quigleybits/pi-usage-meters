@@ -246,7 +246,13 @@ function parseTs(value) {
   return Number.isFinite(ms) ? ms : NaN;
 }
 
-const optionalJson = (url, token, headers) => getJson(url, token, headers, OPTIONAL_TIMEOUT_MS).catch(() => null);
+// Optional follow-up calls never extend a provider past its budget: they get the smaller of their own
+// cap and whatever remains of the provider's deadline, and are skipped once that is spent.
+const optionalJson = (url, token, headers, budgetMs = OPTIONAL_TIMEOUT_MS) => {
+  const timeoutMs = Math.min(OPTIONAL_TIMEOUT_MS, budgetMs);
+  if (!(timeoutMs > 0)) return Promise.resolve(null);
+  return getJson(url, token, headers, timeoutMs).catch(() => null);
+};
 
 export async function fetchAnthropic(ctx) {
   const token = await tokenFor(ctx, "anthropic");
@@ -287,9 +293,10 @@ export async function fetchAnthropic(ctx) {
   return lines;
 }
 
-export async function fetchCodex(ctx) {
+export async function fetchCodex(ctx, clock = Date.now) {
   const token = await tokenFor(ctx, "openai-codex");
   if (!token) throw noAuth("openai-codex");
+  const deadline = clock() + TIMEOUT_MS; // one budget for the whole provider, follow-up calls included
   const accountId = codexAccountId(token);
   const accountHeader = accountId ? { "ChatGPT-Account-Id": accountId } : {};
   const usage = await getJson("https://chatgpt.com/backend-api/wham/usage", token, accountHeader);
@@ -306,7 +313,7 @@ export async function fetchCodex(ctx) {
       ...accountHeader,
       "OpenAI-Beta": "codex-1",
       originator: "Codex Desktop",
-    });
+    }, deadline - clock());
     const dates = (credits?.credits ?? [])
       .filter((credit) => (credit.status ?? "available") === "available")
       .slice(0, visible)
@@ -469,9 +476,12 @@ export async function fetchGlm(ctx) {
     const isSession = Number.isFinite(windowMs)
       ? windowMs <= 86400e3
       : Number.isFinite(resetMs) && resetMs - Date.now() <= 86400e3;
+    // Long windows: the coding plan has weekly model quotas as well as monthly ones. Only an explicit
+    // 7-day unit/number is labelled Week — a reset horizon alone cannot tell a week from a month's tail.
+    const period = windowMs === D7 ? "Week" : "Month";
     if (type === "TOKENS_LIMIT") {
       const label = Number.isFinite(windowMs)
-        ? (isSession ? windowLabel(windowMs) : "Month (tokens)")
+        ? (isSession ? windowLabel(windowMs) : `${period} (tokens)`)
         : "Session (tokens)";
       lines.push(line(label, percent, resetMs, windowMs));
     } else if (type === "TIME_LIMIT") {
@@ -481,7 +491,7 @@ export async function fetchGlm(ctx) {
       // Window shape: unit/number encode the rolling window (verified: {unit:3,number:5}=5h
       // session with NO nextResetTime field; {unit:6,number:1}=monthly with epoch-ms reset).
       // Session when the window itself is short (≤24h); fall back to the reset horizon.
-      lines.push(line(isSession ? (Number.isFinite(windowMs) ? windowLabel(windowMs) : "Session (credits)") : "Month (credits)", percent, resetMs, windowMs)
+      lines.push(line(isSession ? (Number.isFinite(windowMs) ? windowLabel(windowMs) : "Session (credits)") : `${period} (credits)`, percent, resetMs, windowMs)
         + counts(limit.currentValue, limit.usage));
     }
   }
@@ -497,13 +507,15 @@ const MINIMAX_PROVIDERS = [
   { provider: "minimax-cn", host: "https://api.minimaxi.com" },
 ];
 
+// remaining_percent is authoritative when present (the official CLI renders it even for zero-total,
+// time-based plans); counts are shown only when a positive total makes them meaningful.
 function minimaxWindow(reported, total, remainingPercent, boostPermille) {
   const t = Number(total);
-  if (!Number.isFinite(t) || t <= 0) return undefined;
+  const hasTotal = Number.isFinite(t) && t > 0;
   const r = Number(reported);
   const percent = Number(remainingPercent);
   const boost = Number(boostPermille) > 0 ? Number(boostPermille) / 1000 : 1;
-  let remaining = Number.isFinite(r) && r >= 0 && r <= t ? r : NaN; // legacy reading: a remaining count
+  let remaining = hasTotal && Number.isFinite(r) && r >= 0 && r <= t ? r : NaN; // legacy reading: a remaining count
   if (Number.isFinite(percent) && Number.isFinite(remaining)) {
     const asRemaining = Math.abs((remaining / t) * 100 - percent);
     const asUsed = Math.abs(((t - remaining) / t) * 100 - percent);
