@@ -4,3 +4,4 @@ coverage/
 .npmrc
 /0-1-0_release_internal_review.md
 .pi/
+/_local/
