@@ -597,7 +597,7 @@ test("DeepSeek renders the documented balance payload and hides zero components"
   });
   await withFetch(async () => json({ is_available: false, balance_infos: [{ currency: "USD", total_balance: "0.00", granted_balance: "0.00", topped_up_balance: "0.00" }] }), async () => {
     const lines = await fetchDeepseek(ctx);
-    assert.equal(lines[0], "DeepSeek (balance exhausted)");
+    assert.equal(lines[0], "DeepSeek (balance unavailable)");
     assert.match(lines[1], /Balance\s+0\.00 USD$/);
   });
   await assert.rejects(fetchDeepseek(authContext({})), (error) => error.name === "NotConnected" && /DEEPSEEK_API_KEY/.test(error.hint));
@@ -628,6 +628,52 @@ test("MiniMax renders percent-only windows on zero-total time-based plans", asyn
     assert.match(lines[1], /Session \(5h\)\s+████░{6}\s+39% reset/);
     assert.doesNotMatch(lines[1], /\//); // no counts without a usable total
     assert.match(lines[2], /Week\s+█░{9}\s+8% reset/);
+  });
+});
+
+test("MiniMax marks exhausted windows as spent, rejects code 2049, and renders the general bucket first", async () => {
+  const ctx = authContext({ minimax: { source: "apiKey", auth: { apiKey: "mm-key" } } });
+  await withFetch(async () => json({
+    base_resp: { status_code: 0 },
+    model_remains: [
+      {
+        model_name: "video",
+        start_time: Date.now() - 3600e3,
+        end_time: Date.now() + 23 * 3600e3,
+        current_interval_total_count: 10,
+        current_interval_usage_count: 10,
+        current_interval_remaining_percent: 100,
+        current_interval_status: 1,
+        current_weekly_total_count: 0,
+        current_weekly_status: 3,
+      },
+      {
+        model_name: "general",
+        start_time: Date.now() - 3600e3,
+        end_time: Date.now() + 4 * 3600e3,
+        current_interval_total_count: 1500,
+        current_interval_usage_count: 1500,
+        current_interval_remaining_percent: 40, // stale: the server flags the window exhausted
+        current_interval_status: 2,
+        current_weekly_total_count: 10000,
+        current_weekly_usage_count: 9000,
+        current_weekly_remaining_percent: 90,
+        current_weekly_status: 1,
+        weekly_start_time: Date.now() - 86400e3,
+        weekly_end_time: Date.now() + 6 * 86400e3,
+      },
+    ],
+  }), async () => {
+    const lines = await fetchMinimax(ctx);
+    assert.match(lines[1], /Session \(5h\)\s+█{10}\s+100%/);
+    assert.match(lines[2], /Week\s+█░{9}\s+10%.*1,000\/10,000/);
+    assert.match(lines[3], /video\s+░{10}\s+0%/);
+    assert.equal(lines.length, 4);
+  });
+  const load = createUsageLoader();
+  await withFetch(async () => json({ base_resp: { status_code: 2049, status_msg: "invalid api key" } }), async () => {
+    const block = (await load(ctx)).blocks.find((entry) => entry.name === "MiniMax");
+    assert.equal(block.status, "rejected");
   });
 });
 

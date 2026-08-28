@@ -509,7 +509,7 @@ const MINIMAX_PROVIDERS = [
 
 // remaining_percent is authoritative when present (the official CLI renders it even for zero-total,
 // time-based plans); counts are shown only when a positive total makes them meaningful.
-function minimaxWindow(reported, total, remainingPercent, boostPermille) {
+function minimaxWindow(reported, total, remainingPercent, boostPermille, status) {
   const t = Number(total);
   const hasTotal = Number.isFinite(t) && t > 0;
   const r = Number(reported);
@@ -524,9 +524,10 @@ function minimaxWindow(reported, total, remainingPercent, boostPermille) {
   }
   const remainingPct = Number.isFinite(percent) ? percent * boost
     : Number.isFinite(remaining) ? (remaining / t) * 100 * boost : NaN;
-  if (!Number.isFinite(remainingPct)) return undefined;
+  const exhausted = Number(status) === 2; // server says the window is spent, whatever a stale percent claims
+  if (!Number.isFinite(remainingPct) && !exhausted) return undefined;
   return {
-    usedPct: clampPct(100 - remainingPct),
+    usedPct: exhausted ? 100 : clampPct(100 - remainingPct),
     counts: Number.isFinite(remaining) ? ` · ${(t - remaining).toLocaleString()}/${t.toLocaleString()}` : "",
   };
 }
@@ -545,7 +546,7 @@ export async function fetchMinimax(ctx) {
   const payg = auth.key.startsWith("sk-api-");
   const res = await getJson(`${auth.host}${payg ? "/account/query_balance" : "/v1/token_plan/remains"}`, auth.key);
   const code = Number(res?.base_resp?.status_code ?? 0);
-  if (code === 1004) throw new Error("HTTP 401"); // in-band auth failure → "API key rejected"
+  if (code === 1004 || code === 2049) throw new Error("HTTP 401"); // in-band auth failures (login fail / invalid api key) → "API key rejected"
   if (code !== 0) throw new Error(`provider status ${code}`);
   const lines = [header("MiniMax", payg ? "pay-as-you-go" : "token plan")];
   if (payg) {
@@ -556,16 +557,17 @@ export async function fetchMinimax(ctx) {
   const entries = Array.isArray(res?.model_remains) ? res.model_remains.slice(0, 6) : [];
   const notInPlan = (m) => Number(m?.current_interval_total_count) === 0 && Number(m?.current_weekly_total_count) === 0
     && Number(m?.current_interval_status) === 3 && Number(m?.current_weekly_status) === 3;
-  const primary = entries.find((m) => /^MiniMax-M/i.test(String(m?.model_name ?? ""))) ?? entries[0];
-  for (const m of entries) {
+  // "general" is the shared text-model bucket in live payloads (the CLI fixture calls it "MiniMax-M*"); it renders first.
+  const primary = entries.find((m) => /^(general|MiniMax-M)/i.test(String(m?.model_name ?? ""))) ?? entries[0];
+  for (const m of [primary, ...entries.filter((entry) => entry !== primary)]) {
     if (!m || typeof m !== "object" || notInPlan(m)) continue;
-    const interval = minimaxWindow(m.current_interval_usage_count, m.current_interval_total_count, m.current_interval_remaining_percent);
+    const interval = minimaxWindow(m.current_interval_usage_count, m.current_interval_total_count, m.current_interval_remaining_percent, undefined, m.current_interval_status);
     if (m === primary) {
       const windowMs = Number(m.end_time) - Number(m.start_time);
       if (interval) lines.push(line(windowLabel(windowMs), interval.usedPct, Number(m.end_time), windowMs) + interval.counts);
       const weekly = Number(m.current_weekly_status) === 3 // 3 = weekly quota unlimited
         ? undefined
-        : minimaxWindow(m.current_weekly_usage_count, m.current_weekly_total_count, m.current_weekly_remaining_percent, m.weekly_boost_permille);
+        : minimaxWindow(m.current_weekly_usage_count, m.current_weekly_total_count, m.current_weekly_remaining_percent, m.weekly_boost_permille, m.current_weekly_status);
       if (weekly) {
         const weekMs = Number(m.weekly_end_time) - Number(m.weekly_start_time);
         lines.push(line("Week", weekly.usedPct, Number(m.weekly_end_time), weekMs > 0 ? weekMs : D7) + weekly.counts);
@@ -582,7 +584,7 @@ export async function fetchDeepseek(ctx) {
   const key = await apiKeyFor(ctx, "deepseek");
   if (!key) throw new NotConnected("set DEEPSEEK_API_KEY");
   const res = await getJson("https://api.deepseek.com/user/balance", key);
-  const lines = [header("DeepSeek", res?.is_available === false ? "balance exhausted" : "pay-as-you-go")];
+  const lines = [header("DeepSeek", res?.is_available === false ? "balance unavailable" : "pay-as-you-go")];
   for (const info of (Array.isArray(res?.balance_infos) ? res.balance_infos : []).slice(0, 4)) {
     const total = clean(info?.total_balance, 20);
     if (!total) continue;
