@@ -1,6 +1,6 @@
 {
   "name": "pi-usage-meters",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Pi extension: /usage shows subscription quota meters for Claude, Codex, Kimi, Grok, and GLM (Z.ai coding plan) accounts.",
   "keywords": [
     "pi-package",
