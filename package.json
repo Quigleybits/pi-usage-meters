@@ -1,7 +1,7 @@
 {
   "name": "pi-usage-meters",
   "version": "0.4.3",
-  "description": "Pi extension: /usage shows subscription quota meters for Claude, Codex, Copilot, Kimi, Grok, GLM, and MiniMax accounts, plus DeepSeek balances.",
+  "description": "Pi extension: /usage shows subscription quota meters for Claude, Codex, Copilot, Kimi, Grok, GLM, and MiniMax plans.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -19,8 +19,7 @@
     "grok",
     "glm",
     "zai",
-    "minimax",
-    "deepseek"
+    "minimax"
   ],
   "license": "MIT",
   "author": "Aidan Quigley",

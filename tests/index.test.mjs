@@ -13,7 +13,6 @@ import {
   fetchAnthropic,
   fetchCodex,
   fetchCopilot,
-  fetchDeepseek,
   fetchGlm,
   fetchKimi,
   fetchMinimax,
@@ -508,7 +507,7 @@ test("loader marks header-only providers as no plan data and missing logins as u
     assert.match(glm.hint, /ZAI_API_KEY/);
     assert.doesNotMatch(JSON.stringify(data), /not logged in|API key not set/);
     assert.match(renderContent(data), /Claude: no plan data/);
-    assert.match(renderContent(data), /not connected: Codex · Kimi · Grok · Copilot · GLM · MiniMax · DeepSeek/);
+    assert.match(renderContent(data), /not connected: Codex · Kimi · Grok · Copilot · GLM · MiniMax\x1b/);
   });
 });
 
@@ -594,41 +593,19 @@ test("MiniMax in-band auth failure, pay-as-you-go keys, and missing keys", async
   });
 
   const payg = authContext({ minimax: { source: "apiKey", auth: { apiKey: "sk-api-123" } } });
-  await withFetch(async (url) => {
-    assert.equal(String(url), "https://api.minimax.io/account/query_balance");
-    return json({ base_resp: { status_code: 0 }, available_amount: "12.50", cash_balance: "10.00" });
+  let requests = 0;
+  await withFetch(async () => {
+    requests += 1;
+    return json({});
   }, async () => {
-    const lines = await fetchMinimax(payg);
-    assert.equal(lines[0], "MiniMax (pay-as-you-go)");
-    assert.match(lines[1], /Balance\s+12\.50 available/);
+    await assert.rejects(fetchMinimax(payg), (error) => error.name === "NotConnected" && /pay-as-you-go key/.test(error.hint));
   });
+  assert.equal(requests, 0); // a pay-as-you-go key has no plan to meter and never reaches the network
 
   await assert.rejects(
     fetchMinimax(authContext({})),
     (error) => error.name === "NotConnected" && /MINIMAX_API_KEY or MINIMAX_CN_API_KEY/.test(error.hint),
   );
-});
-
-test("DeepSeek renders the documented balance payload and hides zero components", async () => {
-  const ctx = authContext({ deepseek: { source: "apiKey", auth: { apiKey: "ds-key" } } });
-  await withFetch(async (url, init) => {
-    assert.equal(String(url), "https://api.deepseek.com/user/balance");
-    assert.equal(init.headers.Authorization, "Bearer ds-key");
-    return json({
-      is_available: true,
-      balance_infos: [{ currency: "CNY", total_balance: "110.00", granted_balance: "10.00", topped_up_balance: "100.00" }],
-    });
-  }, async () => {
-    const lines = await fetchDeepseek(ctx);
-    assert.equal(lines[0], "DeepSeek (pay-as-you-go)");
-    assert.match(lines[1], /Balance\s+110\.00 CNY · granted 10\.00 · topped up 100\.00/);
-  });
-  await withFetch(async () => json({ is_available: false, balance_infos: [{ currency: "USD", total_balance: "0.00", granted_balance: "0.00", topped_up_balance: "0.00" }] }), async () => {
-    const lines = await fetchDeepseek(ctx);
-    assert.equal(lines[0], "DeepSeek (balance unavailable)");
-    assert.match(lines[1], /Balance\s+0\.00 USD$/);
-  });
-  await assert.rejects(fetchDeepseek(authContext({})), (error) => error.name === "NotConnected" && /DEEPSEEK_API_KEY/.test(error.hint));
 });
 
 test("MiniMax renders percent-only windows on zero-total time-based plans", async () => {
@@ -905,9 +882,9 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   const load = createUsageLoader();
   const [a, b] = await Promise.all([load(ctx), load(ctx)]);
   assert.equal(a, b);
-  assert.equal(resolutions, 10); // 5 OAuth + zai/zai-coding-cn + minimax/minimax-cn + deepseek
+  assert.equal(resolutions, 9); // 5 OAuth + zai/zai-coding-cn + minimax/minimax-cn
   assert.equal(await load(ctx), a);
-  assert.equal(resolutions, 10);
+  assert.equal(resolutions, 9);
 });
 
 test("package manifest limits files and includes community metadata", () => {

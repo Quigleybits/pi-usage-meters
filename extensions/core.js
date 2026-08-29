@@ -51,7 +51,6 @@ export const COLORS = {
   Grok: rgb("#8a8a8a"),
   GLM: rgb("#9b8cff"),
   MiniMax: rgb("#e0457b"),
-  DeepSeek: rgb("#5b6cff"),
   Copilot: rgb("#2ea043"),
 };
 
@@ -585,9 +584,9 @@ export async function fetchMinimax(ctx) {
     }
   }
   if (!auth) throw new NotConnected("set MINIMAX_API_KEY or MINIMAX_CN_API_KEY");
-  // sk-api- keys are pay-as-you-go secret keys: like the CLI, query the account balance instead of a plan.
-  const payg = auth.key.startsWith("sk-api-");
-  const res = await getJson(`${auth.host}${payg ? "/account/query_balance" : "/v1/token_plan/remains"}`, auth.key);
+  // sk-api- keys are pay-as-you-go secret keys with no plan behind them: nothing to meter, no request made.
+  if (auth.key.startsWith("sk-api-")) throw new NotConnected("pay-as-you-go key — no plan to meter");
+  const res = await getJson(`${auth.host}/v1/token_plan/remains`, auth.key);
   const code = Number(res?.base_resp?.status_code ?? 0);
   if (code === 1004 || code === 2049) { // in-band auth failures (login fail / invalid api key) → "API key rejected"
     const rejected = new Error("HTTP 401");
@@ -595,12 +594,7 @@ export async function fetchMinimax(ctx) {
     throw rejected;
   }
   if (code !== 0) throw new Error(`provider status ${code}`);
-  const lines = [header("MiniMax", payg ? "pay-as-you-go" : "token plan")];
-  if (payg) {
-    const amount = clean(res?.available_amount, 20);
-    if (amount) lines.push(plain("Balance", `${amount} available`));
-    return lines;
-  }
+  const lines = [header("MiniMax", "token plan")];
   const entries = Array.isArray(res?.model_remains) ? res.model_remains.slice(0, 6) : [];
   const notInPlan = (m) => Number(m?.current_interval_total_count) === 0 && Number(m?.current_weekly_total_count) === 0
     && Number(m?.current_interval_status) === 3 && Number(m?.current_weekly_status) === 3;
@@ -622,25 +616,6 @@ export async function fetchMinimax(ctx) {
     } else if (interval) {
       lines.push(line(clean(m.model_name, 20) || "model", interval.usedPct));
     }
-  }
-  return lines;
-}
-
-// DeepSeek is pay-as-you-go: the documented balance endpoint (api-docs.deepseek.com/api/get-user-balance).
-export async function fetchDeepseek(ctx) {
-  const key = await apiKeyFor(ctx, "deepseek").catch(() => undefined); // unknown provider on older pi = no key
-  if (!key) throw new NotConnected("set DEEPSEEK_API_KEY");
-  const res = await getJson("https://api.deepseek.com/user/balance", key);
-  const lines = [header("DeepSeek", res?.is_available === false ? "balance unavailable" : "pay-as-you-go")];
-  for (const info of (Array.isArray(res?.balance_infos) ? res.balance_infos : []).slice(0, 4)) {
-    const total = clean(info?.total_balance, 20);
-    if (!total) continue;
-    const parts = [`${total} ${clean(info?.currency, 8) || "?"}`];
-    const granted = clean(info?.granted_balance, 20);
-    const topped = clean(info?.topped_up_balance, 20);
-    if (Number(granted) > 0) parts.push(`granted ${granted}`);
-    if (Number(topped) > 0) parts.push(`topped up ${topped}`);
-    lines.push(plain("Balance", parts.join(" · ")));
   }
   return lines;
 }
@@ -740,7 +715,6 @@ const FETCHERS = [
   ["Copilot", fetchCopilot, "github-copilot"],
   ["GLM", fetchGlm, null], // API-key providers carry no /login target
   ["MiniMax", fetchMinimax, null],
-  ["DeepSeek", fetchDeepseek, null],
 ];
 
 // Footer wording is plain words only. The status or code behind it goes into `debug` — persisted on
