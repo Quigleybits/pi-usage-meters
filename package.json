@@ -1,6 +1,6 @@
 {
   "name": "pi-usage-meters",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Pi extension: /usage shows subscription quota meters for Claude, Codex, Copilot, Kimi, Grok, GLM, and MiniMax plans.",
   "keywords": [
     "pi-package",
