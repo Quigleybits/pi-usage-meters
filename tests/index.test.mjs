@@ -415,9 +415,12 @@ test("network failures surface as network error with system code", async () => {
   await withFetch(async () => {
     throw new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } });
   }, async () => {
-    const text = JSON.stringify(await load(ctx));
-    assert.match(text, /network error \(ECONNREFUSED\)/);
+    const data = await load(ctx);
+    const text = JSON.stringify(data);
+    assert.match(text, /"detail":"network error","debug":"fetch failed ECONNREFUSED"/);
     assert.doesNotMatch(text, /usage unavailable/);
+    assert.match(renderContent(data), /Claude: network error\x1b\[0m/);
+    assert.doesNotMatch(renderContent(data), /ECONNREFUSED/);
   });
 });
 
@@ -436,8 +439,11 @@ test("fetches refuse redirects and a stalled provider reports the 8 s budget", a
     throw error;
   }, async () => {
     const data = await load(authContext({ anthropic: oauth() }));
-    assert.match(JSON.stringify(data), /timed out \(8s\)/);
-    assert.doesNotMatch(JSON.stringify(data), /8000ms/);
+    const claude = data.blocks.find((block) => block.name === "Claude");
+    assert.equal(claude.detail, "timed out");
+    assert.equal(claude.debug, "timed out after 8000ms");
+    assert.match(renderContent(data), /Claude: timed out\x1b\[0m/);
+    assert.doesNotMatch(renderContent(data), /8000|\(8s\)/);
   });
 });
 
@@ -454,7 +460,7 @@ test("unconnected and failing providers collapse into dim footer lines", () => {
       { name: "Codex", status: "unconnected", hint: "/login openai-codex" },
       { name: "Kimi", status: "unconnected", hint: "/login kimi-coding" },
       { name: "Grok", status: "nodata" },
-      { name: "GLM", status: "error", detail: "timed out (8s)" },
+      { name: "GLM", status: "error", detail: "timed out", debug: "timed out after 8000ms" },
     ],
     fetchedAt: "2026-01-01T00:00:00Z",
   };
@@ -462,8 +468,9 @@ test("unconnected and failing providers collapse into dim footer lines", () => {
   assert.equal(lines.length, 6);
   assert.match(lines[0], /Claude \(Max x5\)/);
   assert.match(lines[2], /Grok: no plan data/);
-  assert.match(lines[3], /GLM: timed out \(8s\)/);
+  assert.match(lines[3], /GLM: timed out\x1b\[0m$/);
   assert.match(lines[4], /not connected: Codex · Kimi/);
+  assert.doesNotMatch(renderContent(data), /8000ms/); // debug fields are persisted, never rendered
   assert.match(lines[5], /fetched/);
   for (const footer of lines.slice(2)) assert.ok(footer.startsWith(STAMP), `dim footer: ${footer}`);
   assert.doesNotMatch(renderContent(data), /not logged in|API key not set/);
@@ -846,6 +853,35 @@ test("Copilot never touches the credential store without a live OAuth login, and
   assert.equal(reads, 1);
   assert.equal(block.status, "error");
   assert.equal(block.detail, "login not readable");
+});
+
+test("HTTP failures render as plain words and keep the status and code in the hidden debug field", async () => {
+  const cases = [
+    [429, { code: "resource_exhausted", message: "insufficient balance", details: [{ debug: { reason: "REASON_QUOTA_EXCEEDED" } }] }, "no credits left — plan used up or expired", "HTTP 429 resource_exhausted"],
+    [429, { message: "slow down" }, "rate limited — try again shortly", "HTTP 429"],
+    [402, { error: { code: "insufficient_balance", message: "top up" } }, "no credits left — plan used up or expired", "HTTP 402 insufficient_balance"],
+    [403, {}, "access denied", "HTTP 403"],
+    [404, {}, "endpoint changed — update the extension", "HTTP 404"],
+    [503, "<html>bad gateway</html>", "provider error — try again later", "HTTP 503"],
+    [418, { code: "Bearer secret-token-value", message: "secret-token-value" }, "request failed", "HTTP 418"],
+  ];
+  for (const [status, body, detail, debug] of cases) {
+    const load = createUsageLoader();
+    await withFetch(
+      async () => (typeof body === "string" ? new Response(body, { status }) : json(body, { status })),
+      async () => {
+        const data = await load(authContext({ "kimi-coding": oauth() }));
+        const kimi = data.blocks.find((block) => block.name === "Kimi");
+        assert.equal(kimi.status, "error", `status ${status}`);
+        assert.equal(kimi.detail, detail, `detail for ${status}`);
+        assert.equal(kimi.debug, debug, `debug for ${status}`);
+        const kimiLine = renderContent(data).split("\n").find((line) => line.includes("Kimi"));
+        assert.ok(kimiLine.includes(`Kimi: ${detail}`), kimiLine);
+        assert.ok(!kimiLine.includes(String(status)), `status leaked into footer: ${kimiLine}`);
+        assert.doesNotMatch(JSON.stringify(data), /secret-token-value|slow down|top up|bad gateway/);
+      },
+    );
+  }
 });
 
 test("Grok without a plan reports no meters", async () => {

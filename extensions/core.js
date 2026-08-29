@@ -163,6 +163,24 @@ async function readTextLimited(response) {
   return Buffer.concat(chunks, bytes).toString("utf8");
 }
 
+// Pull a structured, identifier-like code out of an error body — {code}, {error:{code|type}},
+// {details:[{debug:{reason}}]} — and nothing else: free text never leaves this function.
+async function errorCode(res) {
+  try {
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      await res.body?.cancel().catch(() => {});
+      return undefined;
+    }
+    const body = JSON.parse(await readTextLimited(res));
+    const candidates = [body?.code, body?.error?.code, body?.error?.type, body?.reason, body?.details?.[0]?.debug?.reason];
+    const code = candidates.find((value) => typeof value === "string" && /^[A-Za-z_]{2,40}$/.test(value));
+    return code?.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
 export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -172,7 +190,12 @@ export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) 
       redirect: "error", // a quota endpoint never redirects; never carry a credential to a second host
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...headers },
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      const error = new Error(`HTTP ${res.status}`);
+      error.status = res.status;
+      error.code = await errorCode(res);
+      throw error;
+    }
     const declared = Number(res.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
       await res.body?.cancel().catch(() => {});
@@ -566,7 +589,11 @@ export async function fetchMinimax(ctx) {
   const payg = auth.key.startsWith("sk-api-");
   const res = await getJson(`${auth.host}${payg ? "/account/query_balance" : "/v1/token_plan/remains"}`, auth.key);
   const code = Number(res?.base_resp?.status_code ?? 0);
-  if (code === 1004 || code === 2049) throw new Error("HTTP 401"); // in-band auth failures (login fail / invalid api key) → "API key rejected"
+  if (code === 1004 || code === 2049) { // in-band auth failures (login fail / invalid api key) → "API key rejected"
+    const rejected = new Error("HTTP 401");
+    rejected.debug = `HTTP 200 status_code ${code}`;
+    throw rejected;
+  }
   if (code !== 0) throw new Error(`provider status ${code}`);
   const lines = [header("MiniMax", payg ? "pay-as-you-go" : "token plan")];
   if (payg) {
@@ -716,16 +743,31 @@ const FETCHERS = [
   ["DeepSeek", fetchDeepseek, null],
 ];
 
-function safeError(error) {
+// Footer wording is plain words only. The status or code behind it goes into `debug` — persisted on
+// the entry for troubleshooting, never rendered. Remote free text is never used for either.
+const EXHAUSTED = /exhaust|quota|insufficient|balance|credit/i;
+function describeError(error) {
   const message = String(error?.message ?? "");
-  const timeout = message.match(/^timed out after (\d+)ms$/);
-  if (timeout) return `timed out (${Math.round(Number(timeout[1]) / 1000)}s)`;
-  if (/^(HTTP \d{3}|provider status \d{1,6}|response too large|non-JSON response|login not readable)$/.test(message)) return message;
-  if (message === "fetch failed") {
-    const code = String(error?.cause?.code ?? "");
-    return /^[A-Z0-9_]{2,20}$/.test(code) ? `network error (${code})` : "network error";
+  const status = Number(error?.status);
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (Number.isFinite(status) && status > 0) {
+    const debug = `HTTP ${status}${code ? ` ${code}` : ""}`;
+    if (status === 402 || (status === 429 && EXHAUSTED.test(code))) return { detail: "no credits left — plan used up or expired", debug };
+    if (status === 429) return { detail: "rate limited — try again shortly", debug };
+    if (status === 403) return { detail: "access denied", debug };
+    if (status === 404 || status === 410) return { detail: "endpoint changed — update the extension", debug };
+    if (status >= 500) return { detail: "provider error — try again later", debug };
+    return { detail: "request failed", debug };
   }
-  return "usage unavailable";
+  if (/^timed out after \d+ms$/.test(message)) return { detail: "timed out", debug: message };
+  if (message === "fetch failed") {
+    const cause = String(error?.cause?.code ?? "");
+    return { detail: "network error", debug: /^[A-Z0-9_]{2,20}$/.test(cause) ? `fetch failed ${cause}` : "fetch failed" };
+  }
+  if (/^provider status \d{1,6}$/.test(message)) return { detail: "provider error — try again later", debug: message };
+  if (message === "response too large" || message === "non-JSON response") return { detail: "unexpected response", debug: message };
+  if (message === "login not readable") return { detail: "login not readable", debug: message };
+  return { detail: "usage unavailable", debug: `unexpected ${clean(error?.name, 40) || "error"}` };
 }
 
 // Block shapes: { name, lines } when the provider is connected and reported at least one meter;
@@ -739,15 +781,16 @@ async function fetchAll(ctx, deps) {
       return { name, lines };
     } catch (error) {
       if (error instanceof NotConnected) return { name, status: "unconnected", hint: error.hint };
+      const expiredHint = login ? `login expired (/login ${login})` : "API key rejected";
       if (error instanceof LoginFailed) {
         return error.expired
-          ? { name, status: "rejected", hint: login ? `login expired (/login ${login})` : "API key rejected" }
-          : { name, status: "error", detail: "login check failed" };
+          ? { name, status: "rejected", hint: expiredHint, debug: "credential refresh failed" }
+          : { name, status: "error", detail: "login check failed", debug: "credential resolution failed" };
       }
       if (error?.message === "HTTP 401") {
-        return { name, status: "rejected", hint: login ? `login expired (/login ${login})` : "API key rejected" };
+        return { name, status: "rejected", hint: expiredHint, debug: typeof error.debug === "string" ? error.debug : "HTTP 401" };
       }
-      return { name, status: "error", detail: safeError(error) };
+      return { name, status: "error", ...describeError(error) };
     }
   }));
 }
