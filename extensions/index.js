@@ -1,8 +1,10 @@
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { createUsageLoader, renderContent } from "./core.js";
 
 export default function (pi) {
-  const loadUsage = createUsageLoader();
+  // readStoredCredential is pi's public one-off credential read; the Copilot meter is its only consumer.
+  const loadUsage = createUsageLoader({ readCredential: readStoredCredential });
 
   pi.registerEntryRenderer("provider-usage", (entry) => (
     new Text(renderContent(entry.data), 0, 0)

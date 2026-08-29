@@ -12,6 +12,7 @@ import {
   createUsageLoader,
   fetchAnthropic,
   fetchCodex,
+  fetchCopilot,
   fetchDeepseek,
   fetchGlm,
   fetchKimi,
@@ -480,7 +481,7 @@ test("loader marks header-only providers as no plan data and missing logins as u
     assert.match(glm.hint, /ZAI_API_KEY/);
     assert.doesNotMatch(JSON.stringify(data), /not logged in|API key not set/);
     assert.match(renderContent(data), /Claude: no plan data/);
-    assert.match(renderContent(data), /no providers connected|not connected: Codex · Kimi · Grok · GLM/);
+    assert.match(renderContent(data), /not connected: Codex · Kimi · Grok · Copilot · GLM · MiniMax · DeepSeek/);
   });
 });
 
@@ -720,16 +721,111 @@ test("Codex keeps its optional banked-reset lookup inside the provider budget", 
     return json(usage);
   }, async () => {
     const started = Date.now();
-    const lines = await fetchCodex(ctx, clock);
+    const lines = await fetchCodex(ctx, { clock });
     assert.ok(Date.now() - started < 1_500, "the follow-up must be cut to the remaining budget, not its full 2.5 s");
     assert.equal(optionalCalls, 1);
     assert.match(lines.join("\n"), /Banked resets\s+●●$/m);
 
     elapsedAfterPrimary = 8_100; // budget already spent: the follow-up is skipped entirely
-    const skipped = await fetchCodex(ctx, clock);
+    const skipped = await fetchCodex(ctx, { clock });
     assert.equal(optionalCalls, 1);
     assert.match(skipped.join("\n"), /Banked resets\s+●●$/m);
   });
+});
+
+// --- GitHub Copilot: the one meter that reads pi's stored credential (through pi's public API) ---
+
+const copilotCtx = authContext({ "github-copilot": { source: "OAuth", auth: { apiKey: "tid=session;exp=1" } } });
+const copilotCredential = (extra = {}) => ({ type: "oauth", refresh: "gho_github_secret", access: "tid=session;exp=1", expires: 1, ...extra });
+const copilotUser = {
+  login: "octocat",
+  copilot_plan: "individual",
+  access_type_sku: "monthly_subscriber",
+  quota_reset_date: "2030-09-01",
+  quota_snapshots: {
+    premium_interactions: { entitlement: 300, remaining: 212, percent_remaining: 70.7, unlimited: false, overage_count: 0 },
+    chat: { unlimited: true },
+    completions: { unlimited: true },
+  },
+};
+
+test("Copilot reads the GitHub token through the injected credential reader and sends it only to GitHub", async () => {
+  let readFor;
+  const readCredential = async (providerId) => {
+    readFor = providerId;
+    return copilotCredential();
+  };
+  await withFetch(async (url, init) => {
+    assert.equal(String(url), "https://api.github.com/copilot_internal/user");
+    assert.equal(init.headers.Authorization, "Bearer gho_github_secret");
+    assert.match(init.headers["User-Agent"], /^GitHubCopilotChat\//);
+    assert.equal(init.headers["Editor-Version"], "vscode/1.107.0");
+    return json(copilotUser);
+  }, async () => {
+    const lines = await fetchCopilot(copilotCtx, { readCredential });
+    assert.equal(readFor, "github-copilot");
+    assert.equal(lines[0], "Copilot (Pro)");
+    assert.match(lines[1], /Premium requests\s+███░{7}\s+29% reset.*88\/300$/);
+    assert.equal(lines.length, 2); // unlimited chat/completions snapshots are skipped
+  });
+
+  await withFetch(async (url) => {
+    assert.equal(String(url), "https://api.ghe.example.com/copilot_internal/user");
+    return json({ ...copilotUser, copilot_plan: "enterprise", quota_snapshots: { premium_interactions: { entitlement: 1000, remaining: 100, percent_remaining: 10, overage_count: 12 } } });
+  }, async () => {
+    const lines = await fetchCopilot(copilotCtx, { readCredential: async () => copilotCredential({ enterpriseUrl: "https://ghe.example.com/" }) });
+    assert.equal(lines[0], "Copilot (Enterprise)");
+    assert.match(lines[1], /Premium requests.*90%.*900\/1,000 \(\+12 overage\)$/);
+  });
+});
+
+test("Copilot Free tier, lapsed subscriptions, and the loader's status mapping", async () => {
+  const readCredential = async () => copilotCredential();
+  await withFetch(async () => json({
+    copilot_plan: "individual",
+    access_type_sku: "free_limited_copilot",
+    monthly_quotas: { chat: 500, completions: 4000 },
+    limited_user_quotas: { chat: 370, completions: 3922 },
+    limited_user_reset_date: "2030-05-26",
+  }), async () => {
+    const lines = await fetchCopilot(copilotCtx, { readCredential });
+    assert.equal(lines[0], "Copilot (Free)");
+    assert.match(lines[1], /Chat\s+███░{7}\s+26% reset.*130\/500$/);
+    assert.match(lines[2], /Completions\s+░{10}\s+2% reset.*78\/4,000$/);
+  });
+
+  const load = createUsageLoader({ readCredential });
+  await withFetch(async () => json({ copilot_plan: "individual", access_type_sku: "subscription_ended", chat_enabled: false }), async () => {
+    const data = await load(copilotCtx);
+    const block = data.blocks.find((entry) => entry.name === "Copilot");
+    assert.equal(block.status, "nodata");
+    assert.doesNotMatch(JSON.stringify(data), /gho_github_secret|tid=session/);
+  });
+
+  await withFetch(async () => json({ message: "Bad credentials" }, { status: 401 }), async () => {
+    const block = (await createUsageLoader({ readCredential })(copilotCtx)).blocks.find((entry) => entry.name === "Copilot");
+    assert.equal(block.status, "rejected");
+    assert.equal(block.hint, "login expired (/login github-copilot)");
+  });
+});
+
+test("Copilot never touches the credential store without a live OAuth login, and reports an unreadable one", async () => {
+  let reads = 0;
+  const readCredential = async () => {
+    reads += 1;
+    return undefined;
+  };
+  await assert.rejects(fetchCopilot(authContext({}), { readCredential }), (error) => error.name === "NotConnected" && error.hint === "/login github-copilot");
+  await assert.rejects(
+    fetchCopilot(authContext({ "github-copilot": { source: "GITHUB_TOKEN", auth: { apiKey: "ghp_x" } } }), { readCredential }),
+    (error) => error.name === "NotConnected",
+  );
+  assert.equal(reads, 0);
+
+  const block = (await createUsageLoader({ readCredential })(copilotCtx)).blocks.find((entry) => entry.name === "Copilot");
+  assert.equal(reads, 1);
+  assert.equal(block.status, "error");
+  assert.equal(block.detail, "login not readable");
 });
 
 test("Grok without a plan reports no meters", async () => {
@@ -753,9 +849,9 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   const load = createUsageLoader();
   const [a, b] = await Promise.all([load(ctx), load(ctx)]);
   assert.equal(a, b);
-  assert.equal(resolutions, 9); // 4 OAuth + zai/zai-coding-cn + minimax/minimax-cn + deepseek
+  assert.equal(resolutions, 10); // 5 OAuth + zai/zai-coding-cn + minimax/minimax-cn + deepseek
   assert.equal(await load(ctx), a);
-  assert.equal(resolutions, 9);
+  assert.equal(resolutions, 10);
 });
 
 test("package manifest limits files and includes community metadata", () => {

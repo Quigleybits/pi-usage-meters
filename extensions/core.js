@@ -52,6 +52,7 @@ export const COLORS = {
   GLM: rgb("#9b8cff"),
   MiniMax: rgb("#e0457b"),
   DeepSeek: rgb("#5b6cff"),
+  Copilot: rgb("#2ea043"),
 };
 
 export function clean(value, max = 200) {
@@ -293,7 +294,7 @@ export async function fetchAnthropic(ctx) {
   return lines;
 }
 
-export async function fetchCodex(ctx, clock = Date.now) {
+export async function fetchCodex(ctx, { clock = Date.now } = {}) {
   const token = await tokenFor(ctx, "openai-codex");
   if (!token) throw noAuth("openai-codex");
   const deadline = clock() + TIMEOUT_MS; // one budget for the whole provider, follow-up calls included
@@ -598,11 +599,99 @@ export async function fetchDeepseek(ctx) {
   return lines;
 }
 
+// GitHub Copilot. The quota endpoint lives on GitHub's API and authenticates the GitHub OAuth token,
+// while pi hands extensions only the exchanged Copilot session token. This is the one documented
+// exception to "credentials come from getProviderAuth": after getProviderAuth confirms a live OAuth
+// login (pi validates and refreshes it there), the stored credential is read through pi's public
+// readStoredCredential() — injected by the adapter, never parsed here — and its GitHub token is sent
+// only to GitHub's own API host. Header set mirrors pi's Copilot client; the endpoint 403s without a UA.
+const COPILOT_HEADERS = {
+  "User-Agent": "GitHubCopilotChat/0.35.0",
+  "Editor-Version": "vscode/1.107.0",
+  "Editor-Plugin-Version": "copilot-chat/0.35.0",
+  "Copilot-Integration-Id": "vscode-chat",
+};
+const D30 = 30 * 86400e3;
+const COPILOT_PLANS = {
+  individual: "Pro",
+  individual_pro: "Pro+",
+  individual_max: "Max",
+  individual_edu: "Edu",
+  business: "Business",
+  enterprise: "Enterprise",
+};
+
+async function readPiCredential(providerId) {
+  const { readStoredCredential } = await import("@earendil-works/pi-coding-agent");
+  return readStoredCredential(providerId);
+}
+
+function copilotApiHost(enterpriseUrl) {
+  const raw = clean(enterpriseUrl, 200);
+  if (!raw) return "api.github.com";
+  try {
+    const host = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`).hostname.toLowerCase();
+    if (!host || host === "github.com" || host === "api.github.com") return "api.github.com";
+    return host.startsWith("api.") ? host : `api.${host}`;
+  } catch {
+    return "api.github.com";
+  }
+}
+
+function copilotPlanLabel(user) {
+  if (user?.access_type_sku === "free_limited_copilot") return "Free";
+  const plan = String(user?.copilot_plan ?? "");
+  return COPILOT_PLANS[plan] ?? (clean(plan, 24) || undefined);
+}
+
+export async function fetchCopilot(ctx, { readCredential = readPiCredential } = {}) {
+  const session = await ctx.modelRegistry.getProviderAuth("github-copilot");
+  if (session?.source !== "OAuth") throw noAuth("github-copilot");
+  const credential = await readCredential("github-copilot");
+  const githubToken = typeof credential?.refresh === "string" ? credential.refresh.trim() : "";
+  if (!githubToken) throw new Error("login not readable");
+  const user = await getJson(`https://${copilotApiHost(credential.enterpriseUrl)}/copilot_internal/user`, githubToken, COPILOT_HEADERS);
+  const lines = [header("Copilot", copilotPlanLabel(user))];
+  const resetMs = parseTs(user?.quota_reset_date_utc ?? user?.quota_reset_date);
+  const snapshots = user?.quota_snapshots && typeof user.quota_snapshots === "object" ? user.quota_snapshots : undefined;
+  for (const [key, label] of [["premium_interactions", "Premium requests"], ["chat", "Chat"], ["completions", "Completions"]]) {
+    const snap = snapshots?.[key];
+    if (!snap || typeof snap !== "object" || snap.unlimited === true) continue;
+    const entitlement = Number(snap.entitlement);
+    const remaining = Number(snap.remaining ?? snap.quota_remaining);
+    const percentRemaining = Number(snap.percent_remaining);
+    const usedPct = Number.isFinite(percentRemaining)
+      ? clampPct(100 - percentRemaining)
+      : entitlement > 0 && Number.isFinite(remaining) ? pct(entitlement - remaining, entitlement) : NaN;
+    if (!Number.isFinite(usedPct)) continue;
+    const counts = entitlement > 0 && Number.isFinite(remaining)
+      ? ` · ${Math.max(0, entitlement - remaining).toLocaleString()}/${entitlement.toLocaleString()}`
+      : "";
+    const overage = Math.trunc(Number(snap.overage_count));
+    lines.push(line(label, usedPct, resetMs, D30) + counts + (overage > 0 ? ` (+${overage.toLocaleString()} overage)` : ""));
+  }
+  // Copilot Free reports monthly allowances and what is left of them instead of quota snapshots.
+  const monthly = user?.monthly_quotas;
+  const left = user?.limited_user_quotas;
+  if (!snapshots && monthly && typeof monthly === "object" && left && typeof left === "object") {
+    const freeReset = parseTs(user?.limited_user_reset_date);
+    for (const [key, label] of [["chat", "Chat"], ["completions", "Completions"]]) {
+      const limit = Number(monthly[key]);
+      const remaining = Number(left[key]);
+      if (!(limit > 0) || !Number.isFinite(remaining)) continue;
+      const used = Math.max(0, limit - remaining);
+      lines.push(line(label, pct(used, limit), freeReset, D30) + ` · ${used.toLocaleString()}/${limit.toLocaleString()}`);
+    }
+  }
+  return lines;
+}
+
 const FETCHERS = [
   ["Claude", fetchAnthropic, "anthropic"],
   ["Codex", fetchCodex, "openai-codex"],
   ["Kimi", fetchKimi, "kimi-coding"],
   ["Grok", fetchXai, "xai"],
+  ["Copilot", fetchCopilot, "github-copilot"],
   ["GLM", fetchGlm, null], // API-key providers carry no /login target
   ["MiniMax", fetchMinimax, null],
   ["DeepSeek", fetchDeepseek, null],
@@ -612,7 +701,7 @@ function safeError(error) {
   const message = String(error?.message ?? "");
   const timeout = message.match(/^timed out after (\d+)ms$/);
   if (timeout) return `timed out (${Math.round(Number(timeout[1]) / 1000)}s)`;
-  if (/^(HTTP \d{3}|provider status \d{1,6}|response too large|non-JSON response)$/.test(message)) return message;
+  if (/^(HTTP \d{3}|provider status \d{1,6}|response too large|non-JSON response|login not readable)$/.test(message)) return message;
   if (message === "fetch failed") {
     const code = String(error?.cause?.code ?? "");
     return /^[A-Z0-9_]{2,20}$/.test(code) ? `network error (${code})` : "network error";
@@ -623,10 +712,10 @@ function safeError(error) {
 // Block shapes: { name, lines } when the provider is connected and reported at least one meter;
 // otherwise { name, status, hint | detail } with status unconnected | rejected | nodata | error.
 // Status blocks never render as blocks — renderContent folds them into one dim footer line.
-async function fetchAll(ctx) {
+async function fetchAll(ctx, deps) {
   return Promise.all(FETCHERS.map(async ([name, fetcher, login]) => {
     try {
-      const lines = await fetcher(ctx);
+      const lines = await fetcher(ctx, deps);
       if (lines.length <= 1) return { name, status: "nodata" };
       return { name, lines };
     } catch (error) {
@@ -639,14 +728,15 @@ async function fetchAll(ctx) {
   }));
 }
 
-export function createUsageLoader() {
+// deps: { readCredential } — pi's readStoredCredential, supplied by the adapter (tests inject a stub).
+export function createUsageLoader(deps = {}) {
   let cache;
   let inFlight;
   return async (ctx, refresh = false) => {
     if (!refresh && cache && Date.now() - cache.at < CACHE_MS) return cache.data;
     if (inFlight) return inFlight;
     inFlight = (async () => {
-      const data = { blocks: await fetchAll(ctx), fetchedAt: new Date().toISOString() };
+      const data = { blocks: await fetchAll(ctx, deps), fetchedAt: new Date().toISOString() };
       cache = { at: Date.now(), data };
       return data;
     })();
