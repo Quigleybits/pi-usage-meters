@@ -367,7 +367,27 @@ test("unexpected auth errors cannot persist secret text", async () => {
     modelRegistry: { getProviderAuth: async () => { throw new Error("oauth-secret-value"); } },
   });
   assert.doesNotMatch(JSON.stringify(data), /oauth-secret-value/);
-  assert.match(JSON.stringify(data), /usage unavailable/);
+  assert.match(JSON.stringify(data), /login check failed/);
+  assert.doesNotMatch(JSON.stringify(data), /usage unavailable/);
+});
+
+test("an expired OAuth refresh token renders as login expired, never as usage unavailable", async () => {
+  const load = createUsageLoader();
+  const ctx = {
+    modelRegistry: {
+      getProviderAuth: async (provider) => {
+        if (provider !== "anthropic") return undefined;
+        throw new Error('OAuth refresh failed for anthropic: Anthropic token refresh request failed. url=https://platform.claude.com/v1/oauth/token; body={"error": "invalid_grant", "error_description": "Refresh token expired"}');
+      },
+    },
+  };
+  const data = await load(ctx);
+  const claude = data.blocks.find((block) => block.name === "Claude");
+  assert.equal(claude.status, "rejected");
+  assert.equal(claude.hint, "login expired (/login anthropic)");
+  const text = JSON.stringify(data);
+  assert.doesNotMatch(text, /invalid_grant|platform\.claude\.com|usage unavailable/);
+  assert.match(renderContent(data), /Claude: login expired \(\/login anthropic\)/);
 });
 
 test("HTTP 401 from a usage endpoint prompts re-login for that provider", async () => {

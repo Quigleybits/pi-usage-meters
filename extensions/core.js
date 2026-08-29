@@ -192,8 +192,27 @@ export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) 
   }
 }
 
+// Thrown when pi cannot resolve a provider's credential — typically an OAuth refresh that failed
+// because the refresh token itself has expired. Only a fixed hint is ever rendered, never the reason.
+export class LoginFailed extends Error {
+  constructor(provider, reason) {
+    super("login failed");
+    this.name = "LoginFailed";
+    this.provider = provider;
+    this.expired = /expired|invalid_grant|revoked|re-?authenticate|refresh/i.test(String(reason?.message ?? reason ?? ""));
+  }
+}
+
+async function providerAuth(ctx, provider) {
+  try {
+    return await ctx.modelRegistry.getProviderAuth(provider);
+  } catch (error) {
+    throw new LoginFailed(provider, error);
+  }
+}
+
 export async function tokenFor(ctx, provider) {
-  const result = await ctx.modelRegistry.getProviderAuth(provider);
+  const result = await providerAuth(ctx, provider);
   if (result?.source !== "OAuth") return undefined;
   if (typeof result.auth?.apiKey === "string" && result.auth.apiKey) return result.auth.apiKey;
   const headers = result.auth?.headers;
@@ -206,7 +225,7 @@ export async function tokenFor(ctx, provider) {
 
 // zai is an API-key provider (ZAI_API_KEY), not OAuth — accept the key from any auth source.
 export async function apiKeyFor(ctx, provider) {
-  const result = await ctx.modelRegistry.getProviderAuth(provider);
+  const result = await providerAuth(ctx, provider);
   const key = typeof result?.auth?.apiKey === "string" ? result.auth.apiKey : "";
   return key.trim() || undefined;
 }
@@ -582,7 +601,7 @@ export async function fetchMinimax(ctx) {
 
 // DeepSeek is pay-as-you-go: the documented balance endpoint (api-docs.deepseek.com/api/get-user-balance).
 export async function fetchDeepseek(ctx) {
-  const key = await apiKeyFor(ctx, "deepseek");
+  const key = await apiKeyFor(ctx, "deepseek").catch(() => undefined); // unknown provider on older pi = no key
   if (!key) throw new NotConnected("set DEEPSEEK_API_KEY");
   const res = await getJson("https://api.deepseek.com/user/balance", key);
   const lines = [header("DeepSeek", res?.is_available === false ? "balance unavailable" : "pay-as-you-go")];
@@ -645,7 +664,7 @@ function copilotPlanLabel(user) {
 }
 
 export async function fetchCopilot(ctx, { readCredential = readPiCredential } = {}) {
-  const session = await ctx.modelRegistry.getProviderAuth("github-copilot");
+  const session = await providerAuth(ctx, "github-copilot");
   if (session?.source !== "OAuth") throw noAuth("github-copilot");
   const credential = await readCredential("github-copilot");
   const githubToken = typeof credential?.refresh === "string" ? credential.refresh.trim() : "";
@@ -720,6 +739,11 @@ async function fetchAll(ctx, deps) {
       return { name, lines };
     } catch (error) {
       if (error instanceof NotConnected) return { name, status: "unconnected", hint: error.hint };
+      if (error instanceof LoginFailed) {
+        return error.expired
+          ? { name, status: "rejected", hint: login ? `login expired (/login ${login})` : "API key rejected" }
+          : { name, status: "error", detail: "login check failed" };
+      }
       if (error?.message === "HTTP 401") {
         return { name, status: "rejected", hint: login ? `login expired (/login ${login})` : "API key rejected" };
       }
