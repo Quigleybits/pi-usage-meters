@@ -1,8 +1,8 @@
 # pi-usage-meters
 
-A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're connected to** — one compact, colour-coded block instead of a dashboard per provider. Claude, Codex, Kimi, Grok, and GitHub Copilot authenticate via pi's OAuth; GLM uses either `ZAI_API_KEY` (`zai`) or `ZAI_CODING_CN_API_KEY` (`zai-coding-cn`); MiniMax token plans use `MINIMAX_API_KEY` / `MINIMAX_CN_API_KEY`; DeepSeek balances use `DEEPSEEK_API_KEY`.
+A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're connected to** — one compact, colour-coded block instead of a dashboard per provider. Claude, Codex, Kimi, Grok, and GitHub Copilot authenticate via pi's OAuth; GLM, MiniMax, and DeepSeek use the API keys pi already holds (`ZAI_API_KEY` / `ZAI_CODING_CN_API_KEY`, `MINIMAX_API_KEY` / `MINIMAX_CN_API_KEY`, `DEEPSEEK_API_KEY`). DeepSeek sells no subscription, so its block is a prepaid balance rather than a quota window.
 
-![Colour-coded usage meters for Claude, Codex, Kimi, Grok, and GLM (real fixture data)](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/main/assets/pi-usage.png)
+![Colour-coded usage meters for Claude, Codex, Kimi, Grok, and GLM (synthetic fixture data)](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/main/assets/pi-usage.png)
 
 Each provider block is colour-coded on your terminal's existing background, bars fill left-to-right with usage, and the pie glyph (`○ ◔ ◑ ◕ ●`) fills as the quota window elapses toward reset. The entry renders in the transcript but never enters LLM context.
 
@@ -29,9 +29,9 @@ Only providers you are connected to get a block. Everything else collapses into 
 | Claude (`anthropic`) | `api.anthropic.com/api/oauth/profile` | `api.anthropic.com/api/oauth/usage` |
 | Codex (`openai-codex`) | plan from usage payload | `chatgpt.com/backend-api/wham/usage` + `.../rate-limit-reset-credits` |
 | Kimi (`kimi-coding`) | membership level from usage payload | `api.kimi.com/coding/v1/usages` |
-| GLM (`zai`, `zai-coding-cn`) | plan level from usage payload | Global: `api.z.ai/api/monitor/usage/quota/limit`; China: `open.bigmodel.cn/api/monitor/usage/quota/limit` (coding-plan windows: 5h session plus weekly or monthly, classified from the payload's `unit`/`number`; an explicit 7-day window renders as `Week`) |
 | Grok (`xai`) | `cli-chat-proxy.grok.com/v1/settings` | `cli-chat-proxy.grok.com/v1/billing?format=credits` (weekly SuperGrok pool; monthly shape kept as fallback) + redeemed-reset detection |
 | Copilot (`github-copilot`) | `copilot_plan` / `access_type_sku` from the user payload | `api.github.com/copilot_internal/user` (monthly premium requests from `quota_snapshots`; Copilot Free renders its chat/completions allowances); GitHub Enterprise logins use `api.<your-host>` |
+| GLM (`zai`, `zai-coding-cn`) | plan level from usage payload | Global: `api.z.ai/api/monitor/usage/quota/limit`; China: `open.bigmodel.cn/api/monitor/usage/quota/limit` (coding-plan windows: 5h session plus weekly or monthly, classified from the payload's `unit`/`number`; an explicit 7-day window renders as `Week`) |
 | MiniMax (`minimax`, `minimax-cn`) | token plan vs pay-as-you-go from the key type | Global: `api.minimax.io/v1/token_plan/remains`; China: `api.minimaxi.com/v1/token_plan/remains` (5h session + weekly window per model family, same contract as the official MiniMax CLI); `sk-api-` keys query `/account/query_balance` instead |
 | DeepSeek (`deepseek`) | pay-as-you-go | `api.deepseek.com/user/balance` (documented; balance only, no quota windows) |
 
@@ -41,9 +41,9 @@ Only providers you are connected to get a block. Everything else collapses into 
 - The Grok reset-detection feature persists a small state file at `~/.pi/agent/usage-meters-state.json` (override: `PI_USAGE_METERS_STATE`). It contains only the last-seen Grok weekly period boundaries, pool percentage, and a timestamp — no tokens, no secrets, no other providers. It is written atomically, deletable at any time, and never leaves the machine.
 - Codex's non-secret account ID is decoded from the OAuth JWT.
 - **One documented exception to "credentials come from `getProviderAuth` only" — Copilot.** GitHub's quota endpoint authenticates the GitHub OAuth token, but pi hands extensions only the exchanged Copilot session token. So, only after `getProviderAuth("github-copilot")` confirms a live OAuth login (pi validates and refreshes it there), the Copilot meter reads pi's stored credential through pi's public `readStoredCredential()` API — this package never parses the credential file itself — and sends that token **only** to `api.github.com` (or your GitHub Enterprise API host). Nothing else in this package reads the credential store.
-- Credentials are used solely in the `Authorization` header on the provider's own HTTPS quota endpoints. OAuth providers and global Z.AI use `Bearer`; Z.AI Coding CN uses the raw API-key value required by its endpoint. Credentials are never logged, rendered, or written into session entries. Remote error bodies are not persisted.
+- Credentials are used solely in the `Authorization` header on the provider's own HTTPS quota endpoints. OAuth providers and global Z.AI use `Bearer`; Z.AI Coding CN uses the raw API-key value required by its endpoint. Credentials are never logged, rendered, or written into session entries. Remote error bodies are not persisted. Fetches refuse redirects (`redirect: "error"`), so a credential can never follow a redirect to another host.
 - API responses are size-limited; untrusted strings are length-limited and stripped of terminal controls, ANSI, and bidirectional-text controls both before storage and again at render time.
-- Each provider fetch is isolated: one failure never blanks the others.
+- Each provider fetch is isolated and capped at 8 s: one failure or stall never blanks the others.
 
 **Privacy note:** `/usage` stores plan labels, quota percentages, reset times, and any displayed spend figures in the current pi session. Exporting or sharing that session includes this output. Do not share the session if those account details are sensitive. The README screenshot uses synthetic fixture values, not live account data.
 
@@ -58,11 +58,11 @@ Only providers you are connected to get a block. Everything else collapses into 
 - Grok usage-reset credits are served only to the grok.com web app (a cookie-authenticated Connect RPC, `prod_mc_billing.ConsumerUiSvc/GetRemainingResets`); the OAuth-reachable billing API never reports them. The meter therefore **detects redeemed resets by inference**: within one weekly period the pool percentage only climbs, so a drop of 5+ points while the period is unchanged is reported as `Reset used 21 Aug (35% → 5%)`. This needs a small state file (see Privacy). It is inference — an xAI-side recomputation could in theory produce the same signature. If xAI ever exposes explicit counts (`resetsRemaining`), they are rendered as `Resets N available` and take precedence in spirit. `scripts/probe-grok-billing.mjs` (repo only, not shipped) dumps the sanitized payload for re-checking.
 - The state file path defaults to `~/.pi/agent/usage-meters-state.json` and can be overridden with the `PI_USAGE_METERS_STATE` environment variable. Delete the file at any time; the meter simply re-seeds a baseline on the next `/usage` (no reset line is reported for the first observation).
 - The pie glyph uses `○ ◔ ◑ ◕ ●` from the Unicode Geometric Shapes block so a single font renders all states uniformly.
-- Requires a pi version with OAuth login support for the providers you use (`/login anthropic`, `/login openai-codex`, `/login kimi-coding`, `/login xai`).
+- Requires a pi version with OAuth login support for the providers you use (`/login anthropic`, `/login openai-codex`, `/login kimi-coding`, `/login xai`, `/login github-copilot`). The Copilot meter needs pi ≥ 0.80.8, which added the `readStoredCredential` export.
 
 ## Development
 
-Runtime code has no installed dependencies: pi supplies the `@earendil-works/pi-tui` peer. `extensions/index.js` is the small pi adapter; provider, formatting, caching, and security logic lives in `extensions/core.js`.
+Runtime code has no installed dependencies: pi's extension loader supplies the `@earendil-works/pi-tui` and `@earendil-works/pi-coding-agent` imports from its own bundle. `extensions/index.js` is the small pi adapter (it also hands `readStoredCredential` to the loader); provider, formatting, caching, and security logic lives in `extensions/core.js`, which stays testable outside pi.
 
 ```bash
 npm test

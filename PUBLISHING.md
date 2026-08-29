@@ -26,7 +26,7 @@ The workflow grants only `contents: read` and `id-token: write`, checks out the 
    ```bash
    npm test
    npm run check
-   npm publish --dry-run --json
+   npm publish --dry-run --json --ignore-scripts   # --ignore-scripts keeps prepack's test output out of the JSON
    git diff --check
    git status --short
    ```
@@ -48,7 +48,7 @@ The workflow grants only `contents: read` and `id-token: write`, checks out the 
      --generate-notes
    ```
 
-5. Watch the release-triggered workflow:
+5. Watch the release-triggered workflow (it is created a few seconds after the release; re-run the list if it is not there yet):
 
    ```bash
    gh run list --repo Quigleybits/pi-usage-meters --workflow "Publish to npm" --limit 1
