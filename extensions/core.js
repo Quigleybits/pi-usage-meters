@@ -314,10 +314,11 @@ function money(value, exponent) {
   return Number.isFinite(amount) ? (amount / (10 ** exp)).toFixed(exp) : "?";
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function fmtDay(ms) {
   const date = new Date(ms);
   return Number.isFinite(date.getTime())
-    ? `${date.getDate()} ${date.toLocaleDateString("en-GB", { month: "short" })}`
+    ? `${date.getDate()} ${MONTHS[date.getMonth()]}`
     : "";
 }
 
