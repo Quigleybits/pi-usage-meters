@@ -8,6 +8,7 @@ const H5 = 5 * 3600e3;
 const D7 = 7 * 86400e3;
 const RESET_DROP_PCT = 5;
 
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -49,6 +50,7 @@ export const COLORS = {
   Codex: "", // terminal default foreground: pure white vanishes on light themes
   Kimi: rgb("#4fa8ff"),
   Grok: rgb("#8a8a8a"),
+  "Grok Bot": rgb("#8a8a8a"),
   GLM: rgb("#9b8cff"),
   MiniMax: rgb("#e0457b"),
   Copilot: rgb("#2ea043"),
@@ -188,6 +190,43 @@ export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) 
       signal: ctrl.signal,
       redirect: "error", // a quota endpoint never redirects; never carry a credential to a second host
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...headers },
+    });
+    if (!res.ok) {
+      const error = new Error(`HTTP ${res.status}`);
+      error.status = res.status;
+      error.code = await errorCode(res);
+      throw error;
+    }
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      await res.body?.cancel().catch(() => {});
+      throw new Error("response too large");
+    }
+    const text = await readTextLimited(res);
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error("non-JSON response");
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error(`timed out after ${timeoutMs}ms`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// POST twin of getJson for the one RPC-style quota call (Grok Bot). Same limits and error mapping.
+export async function postJson(url, token, headers = {}, body = {}, timeoutMs = TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      signal: ctrl.signal,
+      redirect: "error",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...headers },
+      body: JSON.stringify(body ?? {}),
     });
     if (!res.ok) {
       const error = new Error(`HTTP ${res.status}`);
@@ -466,6 +505,176 @@ export async function fetchXai(ctx) {
   return lines;
 }
 
+// Grok Bot (Cursor-metered): the SuperGrok bot-credit grant is reported only by Cursor's backend —
+// xAI endpoints never carry it (the SuperGrok link is a usage grant on the linked Cursor account).
+// Auth follows the Grok Bot desktop app: browser PKCE handoff at cursor.com, token poll at
+// api2.cursor.sh, rotating refresh pair. See README privacy notes.
+const CURSOR_API = "https://api2.cursor.sh";
+const CURSOR_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
+const CURSOR_LOGIN_URL = "https://cursor.com/loginDeepControl";
+
+// x-cursor-checksum as built by the Grok Bot app: base64url(obfuscate(6-byte big-endian
+// floor(now/1e6))) + machineId. Pure time/machine binding, no secret material.
+export function cursorChecksum(machineId, nowMs = Date.now()) {
+  const whole = Math.floor(nowMs / 1e6);
+  const bytes = new Uint8Array(6);
+  let rest = whole;
+  for (let i = 5; i >= 0; i--) {
+    bytes[i] = rest & 255;
+    rest = Math.floor(rest / 256);
+  }
+  let prev = 165;
+  for (let t = 0; t < bytes.length; t++) {
+    bytes[t] = ((bytes[t] ^ prev) + t % 256) & 255;
+    prev = bytes[t];
+  }
+  return `${Buffer.from(bytes).toString("base64url")}${clean(machineId, 100)}`;
+}
+
+// Decode the JWT payload of a Cursor access token for its expiry (never verified, only sized).
+function jwtExpiryMs(token) {
+  const payload = String(token ?? "").split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const exp = Number(claims?.exp);
+    return Number.isFinite(exp) && exp > 0 ? exp * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Browser login: open cursor.com/loginDeepControl, poll /auth/poll until tokens land.
+// 404 = not ready yet; three consecutive other errors = give up; caps at 150 polls (~7 min).
+export async function cursorLogin({ onAuth, fetchImpl = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), signal } = {}) {
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const uuid = randomUUID();
+  const url = new URL(CURSOR_LOGIN_URL);
+  url.searchParams.set("challenge", challenge);
+  url.searchParams.set("uuid", uuid);
+  url.searchParams.set("mode", "login");
+  url.searchParams.set("redirectTarget", "sand");
+  url.searchParams.set("supportsSelectedTeamLogin", "true");
+  onAuth?.({ url: url.toString() });
+
+  let delay = 1000;
+  let misses = 0;
+  for (let attempt = 0; attempt < 150; attempt++) {
+    signal?.throwIfAborted?.();
+    const poll = new URL(`${CURSOR_API}/auth/poll`);
+    poll.searchParams.set("uuid", uuid);
+    poll.searchParams.set("verifier", verifier);
+    try {
+      const res = await fetchImpl(poll.toString(), {
+        signal,
+        redirect: "error",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+      });
+      if (res.status === 404) {
+        misses = 0;
+      } else if (res.ok) {
+        const body = JSON.parse(await res.text());
+        if (typeof body?.accessToken === "string" && typeof body?.refreshToken === "string") {
+          return { access: body.accessToken, refresh: body.refreshToken, expires: jwtExpiryMs(body.accessToken) ?? Date.now() + 300_000 };
+        }
+        throw new Error("unexpected login response");
+      } else if (res.status === 403) {
+        throw new Error("sign-in blocked");
+      } else if (++misses >= 3) {
+        throw new Error(`login poll failed (HTTP ${res.status})`);
+      }
+    } catch (error) {
+      signal?.throwIfAborted?.();
+      if (error?.message === "sign-in blocked" || error?.message?.startsWith?.("login poll failed")) throw error;
+      if (++misses >= 3) throw new Error("login poll unreachable");
+    }
+    await sleep(Math.min(delay, 10_000));
+    delay *= 1.2;
+  }
+  throw new Error("login timed out — no result from cursor.com");
+}
+
+// Rotating refresh pair via the app's /oauth/token contract.
+export async function cursorRefresh(credentials, { fetchImpl = fetch, signal } = {}) {
+  const res = await fetchImpl(`${CURSOR_API}/oauth/token`, {
+    method: "POST",
+    signal,
+    redirect: "error",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      client_id: CURSOR_CLIENT_ID,
+      grant_type: "refresh_token",
+      refresh_token: credentials?.refresh,
+    }),
+  });
+  if (!res.ok) throw new Error(`refresh failed (HTTP ${res.status})`);
+  const body = JSON.parse(await res.text());
+  const access = typeof body?.access_token === "string" ? body.access_token : undefined;
+  if (!access) throw new Error("refresh response missing token");
+  return {
+    access,
+    refresh: typeof body?.refresh_token === "string" && body.refresh_token ? body.refresh_token : credentials.refresh,
+    expires: jwtExpiryMs(access) ?? Date.now() + 300_000,
+  };
+}
+
+// proto JSON Timestamp → epoch ms.
+const protoTsMs = (ts) => {
+  const seconds = Number(ts?.seconds);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+};
+
+export async function fetchCursor(ctx) {
+  const token = await tokenFor(ctx, "cursor");
+  if (!token) throw noAuth("cursor");
+
+  // One stable pseudo machine id per install, kept in the same small state file as the Grok baseline.
+  const state = await readUsageState();
+  if (typeof state.cursorMachineId !== "string" || !state.cursorMachineId) {
+    state.cursorMachineId = randomUUID();
+    await writeUsageState(state);
+  }
+
+  const payload = await postJson(
+    `${CURSOR_API}/aiserver.v1.DashboardService/GetSandUsageStatus`,
+    token,
+    {
+      "Content-Type": "application/json",
+      "Connect-Protocol-Version": "1",
+      "x-cursor-checksum": cursorChecksum(state.cursorMachineId),
+      "x-cursor-client-type": "GrokBot",
+    },
+    {},
+  );
+
+  const label = clean(payload?.grokPlanLabel, 40) || clean(payload?.includedUsageSuperGrokPlan, 40);
+  const lines = [header("Grok Bot", label)];
+  const resetMs = protoTsMs(payload?.nextResetTimestampUtc);
+  const startMs = protoTsMs(payload?.currentPeriodStart);
+  const windowMs = Number.isFinite(resetMs) && Number.isFinite(startMs) && resetMs > startMs ? resetMs - startMs : D7;
+  const usedPct = Number(payload?.usagePercent);
+
+  if (payload?.usesPooledEnterpriseAllowance === true) {
+    lines.push(plain("Usage", "pooled team allowance"));
+  } else if (Number.isFinite(usedPct)) {
+    lines.push(line("Week", usedPct, resetMs, windowMs));
+  }
+
+  const resets = Number(payload?.availableBankedResetCount);
+  if (Number.isFinite(resets) && resets > 0) {
+    lines.push(plain("Resets", `${resets} available`));
+  }
+  const trialEnd = protoTsMs(payload?.sandTrialExpiresAt);
+  if (Number.isFinite(trialEnd)) {
+    lines.push(plain("Trial", `ends ${new Date(trialEnd).toLocaleDateString("en-GB")}`));
+  }
+  if (payload?.onDemandSettings?.enabled === true) {
+    lines.push(plain("On-demand", "enabled"));
+  }
+  return lines;
+}
+
 // GLM coding plan: monitor endpoints used by the official zai-coding-plugins
 // (undocumented, may change). Keep global first for backward compatibility.
 const GLM_PROVIDERS = [
@@ -712,6 +921,7 @@ const FETCHERS = [
   ["Codex", fetchCodex, "openai-codex"],
   ["Kimi", fetchKimi, "kimi-coding"],
   ["Grok", fetchXai, "xai"],
+  ["Grok Bot", fetchCursor, "cursor"],
   ["Copilot", fetchCopilot, "github-copilot"],
   ["GLM", fetchGlm, null], // API-key providers carry no /login target
   ["MiniMax", fetchMinimax, null],
