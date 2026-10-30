@@ -357,7 +357,20 @@ export async function fetchAnthropic(ctx) {
       : plain("Session (5h)", "window reported, reading unavailable"));
     if (plan === "Ultra") lines.push(plain("", "API meter; may not be an enforced limit"));
   } else if (plan === "Ultra" && isPct(usage.seven_day?.utilization)) {
-    lines.push(plain("Session (5h)", "not reported by API"));
+    lines.push(plain("Session (5h)", "five_hour field not reported"));
+  }
+  // A limits entry {kind: "session", is_active} is telemetry, not proof of enforcement: show the
+  // literal value, and when several disagree (or merely repeat) list them without picking one.
+  // Scan every entry (the payload is already size-capped) but print at most ten values.
+  if (plan === "Ultra") {
+    const flags = (Array.isArray(usage.limits) ? usage.limits : [])
+      .filter((limit) => limit?.kind === "session" && typeof limit.is_active === "boolean")
+      .map((limit) => limit.is_active);
+    if (flags.length === 1) lines.push(plain("API session flag", `is_active: ${flags[0]}`));
+    else if (flags.length > 1) {
+      const shown = flags.slice(0, 10).join(", ") + (flags.length > 10 ? ", …" : "");
+      lines.push(plain("API session flag", `${flags.length} entries (is_active: ${shown}); none selected`));
+    }
   }
   if (usage.seven_day) {
     lines.push(line("Week (all models)", usage.seven_day.utilization, Date.parse(usage.seven_day.resets_at), D7));
