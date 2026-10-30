@@ -303,6 +303,8 @@ export function codexAccountId(token) {
 function claudePlanLabel(profile) {
   const tier = profile?.organization?.rate_limit_tier ?? "";
   const match = String(tier).match(/claude_max_(\d+)x/i);
+  if (match?.[1] === "20") return "Ultra";
+  if (match?.[1] === "5") return "Max";
   if (match) return `Max x${match[1]}`;
   if (profile?.account?.has_claude_max || profile?.organization?.organization_type === "claude_max") return "Max";
   return profile?.account?.has_claude_pro ? "Pro" : undefined;
@@ -344,9 +346,18 @@ export async function fetchAnthropic(ctx) {
     getJson("https://api.anthropic.com/api/oauth/usage", token, headers),
     optionalJson("https://api.anthropic.com/api/oauth/profile", token, headers),
   ]);
-  const lines = [header("Claude", claudePlanLabel(profile))];
+  const plan = claudePlanLabel(profile);
+  const lines = [header("Claude", plan)];
+  const isPct = (value) => typeof value === "number" && Number.isFinite(value);
+  // The plan label alone proves neither Ultra verification nor 5h enforcement, so Ultra reports
+  // what the API returned and nothing more: a reading, a flagged meter, or "not reported".
   if (usage.five_hour) {
-    lines.push(line("Session (5h)", usage.five_hour.utilization, Date.parse(usage.five_hour.resets_at), H5));
+    lines.push(isPct(usage.five_hour.utilization)
+      ? line("Session (5h)", usage.five_hour.utilization, Date.parse(usage.five_hour.resets_at), H5)
+      : plain("Session (5h)", "window reported, reading unavailable"));
+    if (plan === "Ultra") lines.push(plain("", "API meter; may not be an enforced limit"));
+  } else if (plan === "Ultra" && isPct(usage.seven_day?.utilization)) {
+    lines.push(plain("Session (5h)", "not reported by API"));
   }
   if (usage.seven_day) {
     lines.push(line("Week (all models)", usage.seven_day.utilization, Date.parse(usage.seven_day.resets_at), D7));

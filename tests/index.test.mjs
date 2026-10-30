@@ -158,6 +158,137 @@ test("Claude money honours currency exponent", async () => {
   });
 });
 
+const claudeFetch = (usage, profile = {}) => async (url) => {
+  if (String(url).endsWith("/profile")) return profile instanceof Response ? profile : json(profile);
+  return json(usage);
+};
+const inHours = (hours) => new Date(Date.now() + hours * 3600e3).toISOString();
+// A reset is present (pie + relative time); the exact time drifts with test delays.
+const RESET = String.raw`reset \S (?:\d+[dhm] ?)+|reset \S <1m|reset \S soon`;
+const ultra = { organization: { rate_limit_tier: "default_claude_max_20x" } };
+const max5 = { organization: { rate_limit_tier: "default_claude_max_5x" } };
+const week = { utilization: 25, resets_at: inHours(72) };
+const session = (lines) => lines.filter((text) => /^  Session \(5h\)/.test(text));
+
+test("Claude plan labels: max_20x is Ultra, max_5x is Max, other tiers and profile fallbacks unchanged", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  const cases = [
+    [ultra, "Claude (Ultra)"],
+    [max5, "Claude (Max)"],
+    [{ organization: { rate_limit_tier: "default_claude_max_10x" } }, "Claude (Max x10)"],
+    [{ account: { has_claude_max: true } }, "Claude (Max)"],
+    [{ organization: { organization_type: "claude_max" } }, "Claude (Max)"],
+    [{ account: { has_claude_pro: true } }, "Claude (Pro)"],
+    [{ organization: { rate_limit_tier: "default_claude_ai" } }, "Claude"],
+    [{}, "Claude"],
+    [json({}, { status: 500 }), "Claude"],
+  ];
+  for (const [profile, expected] of cases) {
+    await withFetch(claudeFetch({ seven_day: week }, profile), async () => {
+      const lines = await fetchAnthropic(ctx);
+      assert.equal(lines[0], expected);
+      assert.match(lines.join("\n"), /Week \(all models\).*25%/);
+    });
+  }
+});
+
+test("Claude Ultra with a reported 5h window shows the real reading flagged as an API meter", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  await withFetch(claudeFetch({ five_hour: { utilization: 37, resets_at: inHours(2) }, seven_day: week }, ultra), async () => {
+    const lines = await fetchAnthropic(ctx);
+    const text = lines.join("\n");
+    assert.equal(lines[0], "Claude (Ultra)");
+    assert.match(session(lines)[0], new RegExp(String.raw`\s37% (?:${RESET})$`));
+    assert.match(text, /API meter.*may not be an enforced limit/);
+    assert.match(text, /Week \(all models\).*25%/);
+    assert.doesNotMatch(text, /unlimited|verified/i);
+  });
+});
+
+test("Claude Ultra with a null or missing 5h window shows a neutral not-reported line beside the weekly window", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  for (const usage of [{ five_hour: null, seven_day: week }, { seven_day: week }]) {
+    await withFetch(claudeFetch(usage, ultra), async () => {
+      const lines = await fetchAnthropic(ctx);
+      const text = lines.join("\n");
+      assert.equal(lines[0], "Claude (Ultra)");
+      assert.equal(session(lines).length, 1);
+      assert.match(session(lines)[0], /^  Session \(5h\)\s+not reported by API$/);
+      assert.match(text, /Week \(all models\).*25%/);
+      assert.doesNotMatch(text, /unlimited|verified|API meter/i);
+    });
+  }
+  // Ordinary Max without a 5h field keeps omitting the row.
+  await withFetch(claudeFetch({ seven_day: week }, max5), async () => {
+    assert.equal(session(await fetchAnthropic(ctx)).length, 0);
+  });
+});
+
+test("Claude incomplete 5h data reads as unavailable, while a real 0% still renders without a reset", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  for (const profile of [max5, ultra]) {
+    for (const fiveHour of [{ utilization: null, resets_at: inHours(2) }, { resets_at: inHours(2) }, { utilization: "n/a" }, {}]) {
+      await withFetch(claudeFetch({ five_hour: fiveHour, seven_day: week }, profile), async () => {
+        const rows = session(await fetchAnthropic(ctx));
+        assert.equal(rows.length, 1);
+        assert.match(rows[0], /^  Session \(5h\)\s+window reported, reading unavailable$/);
+        assert.doesNotMatch(rows[0], /%/);
+      });
+    }
+    await withFetch(claudeFetch({ five_hour: { utilization: 0, resets_at: null }, seven_day: week }, profile), async () => {
+      const rows = session(await fetchAnthropic(ctx));
+      assert.equal(rows.length, 1);
+      assert.match(rows[0], /^  Session \(5h\)\s+░{10}\s+0%$/);
+    });
+  }
+});
+
+test("Claude Max and Ultra keep 5h, weekly, model and extra-usage output; Ultra adds the API-meter note", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  const usage = {
+    five_hour: { utilization: 42, resets_at: inHours(3) },
+    seven_day: week,
+    limits: [{ group: "weekly", scope: { model: { display_name: "Opus" } }, percent: 7, resets_at: inHours(72) }],
+    extra_usage: { credits_ever_enabled: true, is_enabled: true, currency: "USD", decimal_places: 2, used_credits: 150, monthly_limit: 5000 },
+  };
+  for (const [profile, title, isUltra] of [[max5, "Claude (Max)", false], [ultra, "Claude (Ultra)", true]]) {
+    await withFetch(claudeFetch(usage, profile), async () => {
+      const lines = await fetchAnthropic(ctx);
+      const text = lines.join("\n");
+      assert.equal(lines[0], title);
+      assert.match(session(lines)[0], new RegExp(String.raw`^  Session \(5h\)\s+█+░+\s+42% (?:${RESET})$`));
+      assert.match(text, new RegExp(String.raw`Week \(all models\).*\s25% (?:${RESET})$`, "m"));
+      assert.match(text, new RegExp(String.raw`Week \(Opus\).*\s7% (?:${RESET})$`, "m"));
+      assert.match(text, /Extra usage\s+USD 1\.50\/50\.00/);
+      assert.doesNotMatch(text, /not reported|unavailable|unlimited|verified/i);
+      if (isUltra) {
+        assert.match(lines[2], /^\s+API meter; may not be an enforced limit$/);
+        assert.equal(lines.length, 6);
+      } else {
+        assert.doesNotMatch(text, /API meter/);
+        assert.equal(lines.length, 5);
+      }
+    });
+  }
+});
+
+test("Claude with no usage data stays no plan data, Ultra included", async () => {
+  for (const profile of [{}, ultra]) {
+    const load = createUsageLoader();
+    await withFetch(claudeFetch({}, profile), async () => {
+      const data = await load(authContext({ anthropic: oauth() }));
+      assert.equal(data.blocks.find((block) => block.name === "Claude").status, "nodata");
+      assert.match(renderContent(data), /Claude: no plan data/);
+    });
+  }
+  // Ultra with only a null 5h field and no weekly window has nothing to show either.
+  const load = createUsageLoader();
+  await withFetch(claudeFetch({ five_hour: null }, ultra), async () => {
+    const data = await load(authContext({ anthropic: oauth() }));
+    assert.equal(data.blocks.find((block) => block.name === "Claude").status, "nodata");
+  });
+});
+
 test("Codex derives window labels, omits absent plan, and keeps one expiry per reset", async () => {
   const token = jwt();
   const ctx = authContext({ "openai-codex": oauth(token) });
