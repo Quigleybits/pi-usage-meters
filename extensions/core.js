@@ -349,15 +349,14 @@ export async function fetchAnthropic(ctx) {
   const plan = claudePlanLabel(profile);
   const lines = [header("Claude", plan)];
   const isPct = (value) => typeof value === "number" && Number.isFinite(value);
-  // The plan label alone proves neither Ultra verification nor 5h enforcement, so Ultra reports
-  // what the API returned and nothing more: a reading, a flagged meter, or "not reported".
+  // The plan label alone proves neither Ultra verification nor 5h enforcement, so every plan shows
+  // only what the API returned: a reported window renders (Ultra flags it as an API meter), and a
+  // null or missing five_hour field adds no Session row. Absence implies nothing either way.
   if (usage.five_hour) {
     lines.push(isPct(usage.five_hour.utilization)
       ? line("Session (5h)", usage.five_hour.utilization, Date.parse(usage.five_hour.resets_at), H5)
       : plain("Session (5h)", "window reported, reading unavailable"));
     if (plan === "Ultra") lines.push(plain("", "API meter; may not be an enforced limit"));
-  } else if (plan === "Ultra" && isPct(usage.seven_day?.utilization)) {
-    lines.push(plain("Session (5h)", "five_hour field not reported"));
   }
   // A limits entry {kind: "session", is_active} is telemetry, not proof of enforcement: show the
   // literal value, and when several disagree (or merely repeat) list them without picking one.

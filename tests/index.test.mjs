@@ -167,6 +167,7 @@ const inHours = (hours) => new Date(Date.now() + hours * 3600e3).toISOString();
 const RESET = String.raw`reset \S (?:\d+[dhm] ?)+|reset \S <1m|reset \S soon`;
 const ultra = { organization: { rate_limit_tier: "default_claude_max_20x" } };
 const max5 = { organization: { rate_limit_tier: "default_claude_max_5x" } };
+const pro = { account: { has_claude_pro: true } };
 const week = { utilization: 25, resets_at: inHours(72) };
 const session = (lines) => lines.filter((text) => /^  Session \(5h\)/.test(text));
 
@@ -205,22 +206,41 @@ test("Claude Ultra with a reported 5h window shows the real reading flagged as a
   });
 });
 
-test("Claude Ultra with a null or missing 5h window shows a neutral not-reported line beside the weekly window", async () => {
+test("Claude Ultra with a null or missing 5h window omits the Session row and keeps the weekly window", async () => {
   const ctx = authContext({ anthropic: oauth() });
   for (const usage of [{ five_hour: null, seven_day: week }, { seven_day: week }]) {
     await withFetch(claudeFetch(usage, ultra), async () => {
       const lines = await fetchAnthropic(ctx);
       const text = lines.join("\n");
       assert.equal(lines[0], "Claude (Ultra)");
-      assert.equal(session(lines).length, 1);
-      assert.match(session(lines)[0], /^  Session \(5h\)\s+five_hour field not reported$/);
-      assert.match(text, /Week \(all models\).*25%/);
-      assert.doesNotMatch(text, /unlimited|verified|API meter|API session flag/i);
+      assert.equal(session(lines).length, 0);
+      assert.match(lines[1], new RegExp(String.raw`^  Week \(all models\).*\s25% (?:${RESET})$`));
+      assert.equal(lines.length, 2);
+      assert.doesNotMatch(text, /not reported|five_hour|unavailable|unlimited|verified|API meter|API session flag/i);
     });
   }
   // Ordinary Max without a 5h field keeps omitting the row.
   await withFetch(claudeFetch({ seven_day: week }, max5), async () => {
     assert.equal(session(await fetchAnthropic(ctx)).length, 0);
+  });
+});
+
+test("Claude Pro keeps a reported 5h window with its usage and reset", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  await withFetch(claudeFetch({ five_hour: { utilization: 63, resets_at: inHours(4) }, seven_day: week }, pro), async () => {
+    const lines = await fetchAnthropic(ctx);
+    const text = lines.join("\n");
+    assert.equal(lines[0], "Claude (Pro)");
+    assert.equal(session(lines).length, 1);
+    assert.match(session(lines)[0], new RegExp(String.raw`^  Session \(5h\)\s+█+░+\s+63% (?:${RESET})$`));
+    assert.match(text, /Week \(all models\).*25%/);
+    assert.doesNotMatch(text, /not reported|unavailable|API meter|API session flag/i);
+  });
+  // A real 0% on Pro is a reading, not an absent window.
+  await withFetch(claudeFetch({ five_hour: { utilization: 0, resets_at: inHours(5) }, seven_day: week }, pro), async () => {
+    const rows = session(await fetchAnthropic(ctx));
+    assert.equal(rows.length, 1);
+    assert.match(rows[0], new RegExp(String.raw`^  Session \(5h\)\s+░{10}\s+0% (?:${RESET})$`));
   });
 });
 
@@ -297,18 +317,25 @@ test("Claude Ultra with more than ten session flags reports the total, lists ten
   });
 });
 
-test("Claude Ultra with five_hour missing names the missing field and still shows the session flag", async () => {
+test("Claude Ultra with five_hour missing omits the Session row but keeps a separately reported session flag", async () => {
   const ctx = authContext({ anthropic: oauth() });
   for (const usage of [{ five_hour: null }, {}]) {
-    await withFetch(claudeFetch({ ...usage, seven_day: week, limits: [sessionFlag(false)] }, ultra), async () => {
-      const lines = await fetchAnthropic(ctx);
-      const text = lines.join("\n");
-      assert.equal(session(lines).length, 1);
-      assert.match(session(lines)[0], /^  Session \(5h\)\s+five_hour field not reported$/);
-      assert.deepEqual(flagRows(lines), [`  ${"API session flag".padEnd(22)} is_active: false`]);
-      assert.match(text, /Week \(all models\).*25%/);
-      assert.doesNotMatch(text, /not reported by API|no session|API meter|unlimited|verified/i);
-    });
+    for (const [limits, expected] of [
+      [[sessionFlag(false)], `is_active: false`],
+      [[sessionFlag(true)], `is_active: true`],
+      [[sessionFlag(true), sessionFlag(false)], `2 entries (is_active: true, false); none selected`],
+    ]) {
+      await withFetch(claudeFetch({ ...usage, seven_day: week, limits }, ultra), async () => {
+        const lines = await fetchAnthropic(ctx);
+        const text = lines.join("\n");
+        assert.equal(lines[0], "Claude (Ultra)");
+        assert.equal(session(lines).length, 0);
+        assert.deepEqual(flagRows(lines), [`  ${"API session flag".padEnd(22)} ${expected}`]);
+        assert.match(text, /Week \(all models\).*25%/);
+        assert.equal(lines.length, 3);
+        assert.doesNotMatch(text, /not reported|five_hour|unavailable|no session|API meter|unlimited|verified/i);
+      });
+    }
   }
 });
 
@@ -331,7 +358,7 @@ test("Claude ordinary Max ignores session flags and keeps its output unchanged",
 
 test("Claude incomplete 5h data reads as unavailable, while a real 0% still renders without a reset", async () => {
   const ctx = authContext({ anthropic: oauth() });
-  for (const profile of [max5, ultra]) {
+  for (const profile of [max5, ultra, pro]) {
     for (const fiveHour of [{ utilization: null, resets_at: inHours(2) }, { resets_at: inHours(2) }, { utilization: "n/a" }, {}]) {
       await withFetch(claudeFetch({ five_hour: fiveHour, seven_day: week }, profile), async () => {
         const rows = session(await fetchAnthropic(ctx));
