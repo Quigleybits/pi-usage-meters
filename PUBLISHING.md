@@ -13,7 +13,7 @@ The npm package is configured with this Trusted Publisher:
 - environment: `npm`
 - allowed action: `npm publish`
 
-Package publishing access is set to **Require two-factor authentication and disallow tokens**. The GitHub `npm` environment contains no secrets.
+Package publishing access is set to **Require two-factor authentication and disallow tokens**. The GitHub `npm` environment contains no secrets. The `npm` environment requires the maintainer's approval before every publish job (admin bypass is off), and it accepts deployments only from tags that match `v*`.
 
 The workflow grants only `contents: read` and `id-token: write`, checks out the release tag, verifies that the tag matches `package.json`, runs the test and syntax suites, and publishes with provenance.
 
@@ -48,10 +48,11 @@ The workflow grants only `contents: read` and `id-token: write`, checks out the 
      --generate-notes
    ```
 
-5. Watch the release-triggered workflow (it is created a few seconds after the release; re-run the list if it is not there yet):
+5. Approve and watch the release-triggered workflow (it is created a few seconds after the release; re-run the list if it is not there yet). The publish job waits in the `npm` environment until the maintainer approves it:
 
    ```bash
    gh run list --repo Quigleybits/pi-usage-meters --workflow "Publish to npm" --limit 1
+   gh api -X POST repos/Quigleybits/pi-usage-meters/actions/runs/<run-id>/pending_deployments -F 'environment_ids[]=18779940138' -f state=approved -f comment='release v0.1.1'
    gh run watch <run-id> --repo Quigleybits/pi-usage-meters --exit-status
    ```
 
