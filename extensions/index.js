@@ -6,9 +6,8 @@ export default function (pi) {
   // readStoredCredential is pi's public one-off credential read; the Copilot meter is its only consumer.
   const loadUsage = createUsageLoader({ readCredential: readStoredCredential });
 
-  // Grok Bot credits are metered on a Cursor account (SuperGrok links are usage grants there),
-  // so the meter authenticates as Cursor: browser handoff at cursor.com, token poll + rotating
-  // refresh against api2.cursor.sh. pi stores and refreshes the pair like every other provider.
+  // Grok Bot auth is a Cursor login. The loader omits that block when it is the same SuperGrok
+  // pool already shown under Grok. The login still matters for a separate grant.
   pi.registerProvider("cursor", {
     oauth: {
       name: "Cursor (Grok Bot)",

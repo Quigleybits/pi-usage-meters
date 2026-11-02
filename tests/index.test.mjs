@@ -620,6 +620,7 @@ test("Grok parses weekly credits, monthly fallback, and product split", async ()
           isUnifiedBillingUser: true,
           productUsage: [
             { product: "GrokBuild", usagePercent: 10 },
+            { product: "GrokBuildPro", usagePercent: 2 },
             { product: "GrokImagine", usagePercent: 6 },
             { product: "GrokChat", usagePercent: 1 },
           ],
@@ -646,9 +647,17 @@ test("Grok parses weekly credits, monthly fallback, and product split", async ()
     const weekly = await fetchXai(ctx);
     assert.equal(weekly[0], "Grok (SuperGrok)");
     assert.match(weekly.join("\n"), /Week \(credits\).*17%/);
-    assert.match(weekly.join("\n"), /Build.*10%/);
+    assert.match(weekly.join("\n"), /Bot\s+.*10%/);
+    assert.doesNotMatch(weekly.join("\n"), /Grok Bot \(SuperGrok\)/);
+    assert.doesNotMatch(weekly.join("\n"), /^  Build\b/m);
+    assert.match(weekly.join("\n"), /BuildPro.*\s+2%/);
     assert.match(weekly.join("\n"), /Imagine.*\s+6%/);
     assert.match(weekly.join("\n"), /Chat.*\s+1%/);
+    // Products sum to 19%, not the 17% week, so they are not slices: same 2-space indent as the week.
+    for (const name of ["Bot", "BuildPro", "Imagine", "Chat"]) {
+      assert.match(weekly.find((row) => row.trimStart().startsWith(`${name} `)), new RegExp(`^  ${name} `));
+    }
+    assert.match(weekly.find((row) => row.trimStart().startsWith("Week (credits) ")), /^  Week \(credits\) /);
     assert.match(weekly.join("\n"), /On-demand.*25%/);
     assert.match(weekly.join("\n"), /Prepaid balance.*12/);
 
@@ -1372,7 +1381,7 @@ test("cursorRefresh rotates the pair and falls back to the old refresh token", a
   });
 });
 
-test("fetchCursor renders the SuperGrok bot meter", async () => {
+test("fetchCursor labels Grok Bot by credit source", async () => {
   const ctx = authContext({ cursor: oauth("cursor-token") });
   let request = null;
   await withFetch(async (url, init) => {
@@ -1382,6 +1391,7 @@ test("fetchCursor renders the SuperGrok bot meter", async () => {
       nextResetTimestampUtc: { seconds: "2049849600", nanos: 0 },
       usagePercent: 61,
       availableBankedResetCount: "2",
+      includedUsageSuperGrokPlan: "super_grok",
       grokPlanLabel: "SuperGrok",
       onDemandSettings: { visible: true, eligible: true, enabled: true },
     });
@@ -1395,13 +1405,24 @@ test("fetchCursor renders the SuperGrok bot meter", async () => {
     assert.equal(request.init.method, "POST");
     assert.match(request.init.headers["x-cursor-checksum"], /^[A-Za-z0-9_-]{8}/);
   });
+  // A plan label does not identify the source of Cursor-funded credits.
+  await withFetch(async () => json({
+    currentPeriodStart: { seconds: "2049244800", nanos: 0 },
+    nextResetTimestampUtc: { seconds: "2049849600", nanos: 0 },
+    usagePercent: 24,
+    grokPlanLabel: "SuperGrok",
+  }), async () => {
+    const lines = await fetchCursor(ctx);
+    assert.equal(lines[0], "Grok Bot (Cursor)");
+    assert.match(lines.join("\n"), /Week.*24%/);
+  });
   // Enterprise pooled allowance renders without a percent bar; trial date pinned.
   await withFetch(async () => json({
     usesPooledEnterpriseAllowance: true,
     sandTrialExpiresAt: { seconds: "4102444800", nanos: 0 },
   }), async () => {
     const lines = await fetchCursor(ctx);
-    assert.equal(lines[0], "Grok Bot");
+    assert.equal(lines[0], "Grok Bot (Cursor)");
     assert.match(lines.join("\n"), /pooled team allowance/);
     assert.match(lines.join("\n"), /Trial\s+ends/);
     assert.ok(!/Week/.test(lines.join("\n")));
@@ -1409,6 +1430,106 @@ test("fetchCursor renders the SuperGrok bot meter", async () => {
   // No credential → not connected, never a network call.
   await withFetch(async () => { throw new Error("network must not be called"); }, async () => {
     await assert.rejects(() => fetchCursor(authContext({})), (error) => error instanceof NotConnected && error.hint === "/login cursor");
+  });
+});
+
+test("fetchCursor reads an ISO Grok-billed period without calling it Cursor", async () => {
+  const ctx = authContext({ cursor: oauth("cursor-token") });
+  await withFetch(async () => json({
+    currentPeriodStart: "2030-08-05T00:00:00.000Z",
+    nextResetTimestampUtc: "2030-08-12T00:00:00.000Z",
+    usagePercent: 28.479,
+    billingBrand: "SAND_BILLING_BRAND_GROK",
+    grokPlanLabel: "Grok Bot Plan",
+    cursorPlanName: "Super",
+  }), async () => {
+    const lines = await fetchCursor(ctx);
+    assert.equal(lines[0], "Grok Bot");
+    assert.match(lines.join("\n"), /Week.*28%/);
+    assert.match(lines.join("\n"), /reset/);
+    assert.doesNotMatch(lines.join("\n"), /Cursor/);
+  });
+});
+
+test("a Grok Bot reading of the same weekly pool is not a second block", async () => {
+  const ctx = authContext({ xai: oauth("grok-token"), cursor: oauth("cursor-token") });
+  const period = ["2030-08-05T01:10:27.629+00:00", "2030-08-12T01:10:27.629+00:00"];
+  await withFetch(async (url) => {
+    const href = String(url);
+    if (href.endsWith("/settings")) return json({ subscription_tier_display: "SuperGrok Plus" });
+    if (href.includes("/billing")) {
+      return json({
+        config: {
+          currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", start: period[0], end: period[1] },
+          creditUsagePercent: 28,
+          isUnifiedBillingUser: true,
+          productUsage: [
+            { product: "GrokBot", usagePercent: 23 },
+            { product: "Api", usagePercent: 5 },
+          ],
+        },
+      });
+    }
+    if (href.endsWith("/GetSandUsageStatus")) {
+      return json({
+        currentPeriodStart: "2030-08-05T01:10:27.629Z",
+        nextResetTimestampUtc: "2030-08-12T01:10:27.629Z",
+        usagePercent: 28.479,
+        isUnified: true,
+        billingBrand: "SAND_BILLING_BRAND_GROK",
+        availableBankedResetCount: 2,
+      });
+    }
+    throw new Error(`unexpected ${href}`);
+  }, async () => {
+    const data = await createUsageLoader()(ctx, true);
+    assert.equal(data.blocks.some((block) => block.name === "Grok Bot"), false);
+    const text = data.blocks.find((block) => block.name === "Grok").lines.join("\n");
+    assert.match(text, /Week \(credits\).*28%/);
+    assert.match(text, /Bot\s+.*23%/);
+    assert.match(text, /Grok API\s+.*5%/);
+    // 23% + 5% = the 28% week, so the products are slices of it and indent 2 spaces deeper.
+    const rows = data.blocks.find((block) => block.name === "Grok").lines;
+    assert.match(rows.find((row) => row.trimStart().startsWith("Week (credits) ")), /^  Week \(credits\) /);
+    assert.match(rows.find((row) => row.trimStart().startsWith("Bot ")), /^    Bot /);
+    assert.match(rows.find((row) => row.trimStart().startsWith("Grok API ")), /^    Grok API /);
+    assert.match(text, /Resets\s+2 available/);
+    assert.doesNotMatch(renderContent(data), /Grok Bot/);
+  });
+});
+
+test("a Grok Bot reading from a different period stays visible", async () => {
+  const ctx = authContext({ xai: oauth("grok-token"), cursor: oauth("cursor-token") });
+  await withFetch(async (url) => {
+    const href = String(url);
+    if (href.endsWith("/settings")) return json({ subscription_tier_display: "SuperGrok" });
+    if (href.includes("/billing")) {
+      return json({
+        config: {
+          currentPeriod: {
+            type: "USAGE_PERIOD_TYPE_WEEKLY",
+            start: "2030-08-05T00:00:00Z",
+            end: "2030-08-12T00:00:00Z",
+          },
+          creditUsagePercent: 28,
+          isUnifiedBillingUser: true,
+          productUsage: [{ product: "GrokBot", usagePercent: 28 }],
+        },
+      });
+    }
+    if (href.endsWith("/GetSandUsageStatus")) {
+      return json({
+        currentPeriodStart: "2030-08-12T00:00:00Z",
+        nextResetTimestampUtc: "2030-08-19T00:00:00Z",
+        usagePercent: 28,
+      });
+    }
+    throw new Error(`unexpected ${href}`);
+  }, async () => {
+    const data = await createUsageLoader()(ctx, true);
+    const bot = data.blocks.find((block) => block.name === "Grok Bot");
+    assert.equal(bot.lines[0], "Grok Bot (Cursor)");
+    assert.match(bot.lines.join("\n"), /Week.*28%/);
   });
 });
 

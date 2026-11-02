@@ -100,7 +100,12 @@ export function pie(windowMs, resetMs) {
   return PIE[Math.round((1 - remaining) * (PIE.length - 1))];
 }
 
-const field = (label) => clean(label, LABEL_W).padEnd(LABEL_W);
+// A leading run of spaces is an intentional indent (e.g. Grok product slices); keep it inside LABEL_W.
+const field = (label) => {
+  const text = String(label ?? "");
+  const indent = /^ */.exec(text)[0].slice(0, LABEL_W);
+  return (indent + clean(text, LABEL_W - indent.length)).padEnd(LABEL_W);
+};
 
 export function line(label, value, resetMs, windowMs) {
   const usedPct = clampPct(value);
@@ -465,8 +470,18 @@ export async function fetchKimi(ctx) {
   return lines;
 }
 
+function tagMeter(lines, meter) {
+  Object.defineProperty(lines, "meter", { value: meter, enumerable: false });
+  return lines;
+}
+
+// Product names are a split of one pool when their percents add up to it. "Api" is that
+// pool's Grok API slice, not the separate X developer credit balance.
 function grokProductLabel(product) {
-  const raw = clean(String(product ?? "").replace(/^Grok/i, ""), 20);
+  const value = clean(String(product ?? ""), 40);
+  if (/^(Grok)?(Bot|Build)$/i.test(value)) return "Bot";
+  if (/^(Grok)?Api$/i.test(value) || /^XaiApi$/i.test(value)) return "Grok API";
+  const raw = clean(value.replace(/^Grok/i, ""), 20);
   return raw || "product";
 }
 
@@ -491,10 +506,14 @@ export async function fetchXai(ctx) {
 
   if (weekly) {
     lines.push(line("Week (credits)", Number.isFinite(creditPct) ? creditPct : 0, end, periodMs));
-    for (const product of (config.productUsage ?? []).slice(0, 8)) {
+    const products = (config.productUsage ?? []).slice(0, 8).flatMap((product) => {
       const productPct = Number(product?.usagePercent);
-      if (!Number.isFinite(productPct)) continue;
-      lines.push(line(grokProductLabel(product.product), productPct));
+      return Number.isFinite(productPct) ? [{ name: grokProductLabel(product.product), pct: productPct }] : [];
+    });
+    const productSum = products.reduce((sum, product) => sum + product.pct, 0);
+    const slices = products.length > 0 && Number.isFinite(creditPct) && Math.round(productSum) === Math.round(creditPct);
+    for (const product of products) {
+      lines.push(line(slices ? `  ${product.name}` : product.name, product.pct));
     }
 
     // Reset credits are web-session-only at xAI (ConsumerUiSvc), so the meter infers
@@ -543,11 +562,14 @@ export async function fetchXai(ctx) {
   if (Number.isFinite(prepaid) && prepaid > 0) {
     lines.push(plain("Prepaid balance", prepaid.toLocaleString()));
   }
+  if (weekly && Number.isFinite(creditPct) && Number.isFinite(start) && Number.isFinite(end)) {
+    tagMeter(lines, { pct: creditPct, periodStartMs: start, periodEndMs: end });
+  }
   return lines;
 }
 
-// Grok Bot (Cursor-metered): the SuperGrok bot-credit grant is reported only by Cursor's backend —
-// xAI endpoints never carry it (the SuperGrok link is a usage grant on the linked Cursor account).
+// The Cursor endpoint can report the same unified Grok pool (same period, same percent) or a
+// separate grant. fetchAll drops the second block only when the period and percent match.
 // Auth follows the Grok Bot desktop app: browser PKCE handoff at cursor.com, token poll at
 // api2.cursor.sh, rotating refresh pair. See README privacy notes.
 const CURSOR_API = "https://api2.cursor.sh";
@@ -660,10 +682,17 @@ export async function cursorRefresh(credentials, { fetchImpl = fetch, signal } =
   };
 }
 
-// proto JSON Timestamp → epoch ms.
+// proto JSON Timestamp or an ISO string → epoch ms. The Sand endpoint has returned both.
 const protoTsMs = (ts) => {
   const seconds = Number(ts?.seconds);
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+};
+const instantMs = (value) => {
+  if (typeof value === "string" || typeof value === "number") {
+    const ms = parseTs(value);
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+  return protoTsMs(value);
 };
 
 export async function fetchCursor(ctx) {
@@ -689,29 +718,42 @@ export async function fetchCursor(ctx) {
     {},
   );
 
-  const label = clean(payload?.grokPlanLabel, 40) || clean(payload?.includedUsageSuperGrokPlan, 40);
-  const lines = [header("Grok Bot", label)];
-  const resetMs = protoTsMs(payload?.nextResetTimestampUtc);
-  const startMs = protoTsMs(payload?.currentPeriodStart);
+  // includedUsageSuperGrokPlan is the explicit grant field. grokPlanLabel is plan-tier text, not a source.
+  // A Grok billingBrand means this reading is the Grok pool, even when the grant field is empty.
+  const brand = clean(payload?.billingBrand, 60);
+  const source = clean(payload?.includedUsageSuperGrokPlan, 40)
+    ? "SuperGrok"
+    : /GROK/i.test(brand) ? "" : "Cursor";
+  const lines = [source ? header("Grok Bot", source) : "Grok Bot"];
+  const resetMs = instantMs(payload?.nextResetTimestampUtc);
+  const startMs = instantMs(payload?.currentPeriodStart);
   const windowMs = Number.isFinite(resetMs) && Number.isFinite(startMs) && resetMs > startMs ? resetMs - startMs : D7;
   const usedPct = Number(payload?.usagePercent);
+  const extras = [];
+  const addExtra = (row) => {
+    lines.push(row);
+    extras.push(row);
+  };
 
   if (payload?.usesPooledEnterpriseAllowance === true) {
-    lines.push(plain("Usage", "pooled team allowance"));
+    addExtra(plain("Usage", "pooled team allowance"));
   } else if (Number.isFinite(usedPct)) {
     lines.push(line("Week", usedPct, resetMs, windowMs));
   }
 
   const resets = Number(payload?.availableBankedResetCount);
   if (Number.isFinite(resets) && resets > 0) {
-    lines.push(plain("Resets", `${resets} available`));
+    addExtra(plain("Resets", `${resets} available`));
   }
-  const trialEnd = protoTsMs(payload?.sandTrialExpiresAt);
+  const trialEnd = instantMs(payload?.sandTrialExpiresAt);
   if (Number.isFinite(trialEnd)) {
-    lines.push(plain("Trial", `ends ${new Date(trialEnd).toLocaleDateString("en-GB")}`));
+    addExtra(plain("Trial", `ends ${new Date(trialEnd).toLocaleDateString("en-GB")}`));
   }
   if (payload?.onDemandSettings?.enabled === true) {
-    lines.push(plain("On-demand", "enabled"));
+    addExtra(plain("On-demand", "enabled"));
+  }
+  if (Number.isFinite(usedPct) && Number.isFinite(startMs) && Number.isFinite(resetMs)) {
+    tagMeter(lines, { pct: usedPct, periodStartMs: startMs, periodEndMs: resetMs, extras });
   }
   return lines;
 }
@@ -998,8 +1040,30 @@ function describeError(error) {
 // Block shapes: { name, lines } when the provider is connected and reported at least one meter;
 // otherwise { name, status, hint | detail } with status unconnected | rejected | nodata | error.
 // Status blocks never render as blocks — renderContent folds them into one dim footer line.
+function sameGrokPool(grokLines, botLines) {
+  const grok = grokLines?.meter;
+  const bot = botLines?.meter;
+  if (!grok || !bot) return false;
+  const values = [grok.pct, bot.pct, grok.periodStartMs, grok.periodEndMs, bot.periodStartMs, bot.periodEndMs];
+  if (!values.every(Number.isFinite)) return false;
+  if (grok.periodStartMs !== bot.periodStartMs || grok.periodEndMs !== bot.periodEndMs) return false;
+  return Math.abs(grok.pct - bot.pct) < 1;
+}
+
+// One unified pool should render once. Cursor-only extras (resets, trial) stay on the Grok block.
+function dedupeGrokBot(blocks) {
+  const grok = blocks.find((block) => block.name === "Grok" && Array.isArray(block.lines));
+  const index = blocks.findIndex((block) => block.name === "Grok Bot" && Array.isArray(block.lines));
+  if (!grok || index < 0 || !sameGrokPool(grok.lines, blocks[index].lines)) return blocks;
+  for (const extra of blocks[index].lines.meter.extras ?? []) {
+    if (!grok.lines.includes(extra)) grok.lines.push(extra);
+  }
+  blocks.splice(index, 1);
+  return blocks;
+}
+
 async function fetchAll(ctx, deps) {
-  return Promise.all(FETCHERS.map(async ([name, fetcher, login]) => {
+  const blocks = await Promise.all(FETCHERS.map(async ([name, fetcher, login]) => {
     try {
       const lines = await fetcher(ctx, deps);
       if (lines.length <= 1) return { name, status: "nodata" };
@@ -1018,6 +1082,7 @@ async function fetchAll(ctx, deps) {
       return { name, status: "error", ...describeError(error) };
     }
   }));
+  return dedupeGrokBot(blocks);
 }
 
 // deps: { readCredential } — pi's readStoredCredential, supplied by the adapter (tests inject a stub).
