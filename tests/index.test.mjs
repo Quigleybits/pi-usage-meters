@@ -1447,3 +1447,21 @@ test("state writes use their own temp file, so a stray or shared .tmp cannot blo
   assert.ok(Number.isFinite(JSON.parse(readFileSync(statePath, "utf8")).xai.pct));
   assert.deepEqual(readdirSync(dirname(statePath)).sort(), ["state.json", "state.json.tmp"]);
 }));
+
+test("Grok: a detected reset stays visible for the rest of its period and a new period clears it", () => withState(async (statePath) => {
+  const first = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 5), statePath, {
+    xai: { periodStart: PERIOD_A[0], periodEnd: PERIOD_A[1], pct: 35 },
+  });
+  const notice = first.find((row) => row.includes("Reset used"));
+  assert.match(notice, /\(35% → 5%\)$/);
+  const later = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 9), statePath);
+  assert.equal(later.find((row) => row.includes("Reset used")), notice);
+  const next = await runGrokFetch(grokBilling(PERIOD_B[0], PERIOD_B[1], 2), statePath);
+  assert.ok(!next.some((row) => row.includes("Reset used")));
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).xai.resetUsed, undefined);
+  // A damaged saved notice is dropped, never rendered.
+  const damaged = await runGrokFetch(grokBilling(PERIOD_B[0], PERIOD_B[1], 3), statePath, {
+    xai: { periodStart: PERIOD_B[0], periodEnd: PERIOD_B[1], pct: 2, resetUsed: { at: "\u001b[31mnot a date", from: "35", to: {} } },
+  });
+  assert.ok(!damaged.some((row) => row.includes("Reset used")));
+}));

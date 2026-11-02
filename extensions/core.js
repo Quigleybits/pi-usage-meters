@@ -458,6 +458,14 @@ function grokProductLabel(product) {
   return raw || "product";
 }
 
+// A saved reset notice from the state file, or undefined when any field is damaged.
+function savedReset(value) {
+  const at = Date.parse(value?.at);
+  return Number.isFinite(at) && Number.isFinite(value?.from) && Number.isFinite(value?.to)
+    ? { at: new Date(at).toISOString(), from: value.from, to: value.to }
+    : undefined;
+}
+
 export async function fetchXai(ctx) {
   const token = await tokenFor(ctx, "xai");
   if (!token) throw noAuth("xai");
@@ -498,11 +506,15 @@ export async function fetchXai(ctx) {
     if (Number.isFinite(creditPct) && startIso && endIso) {
       const state = await readUsageState();
       const prev = state.xai;
-      if (
-        prev?.periodStart === startIso && prev?.periodEnd === endIso
-        && Number.isFinite(Number(prev.pct)) && prev.pct - creditPct >= RESET_DROP_PCT
-      ) {
-        lines.push(plain("Reset used", `${fmtDay(Date.now())} (${Math.round(prev.pct)}% → ${Math.round(creditPct)}%)`));
+      const samePeriod = prev?.periodStart === startIso && prev?.periodEnd === endIso;
+      // A detected reset stays on the block for the rest of its period, so another reader of the
+      // state file (a second pi session, the headless runner) cannot use the notice up.
+      let resetUsed = samePeriod ? savedReset(prev.resetUsed) : undefined;
+      if (samePeriod && Number.isFinite(Number(prev.pct)) && prev.pct - creditPct >= RESET_DROP_PCT) {
+        resetUsed = { at: new Date().toISOString(), from: Number(prev.pct), to: creditPct };
+      }
+      if (resetUsed) {
+        lines.push(plain("Reset used", `${fmtDay(Date.parse(resetUsed.at))} (${Math.round(resetUsed.from)}% → ${Math.round(resetUsed.to)}%)`));
       }
       for (const key of ["resetsRemaining", "remainingResets"]) {
         const count = Math.trunc(Number(config[key]));
@@ -511,7 +523,7 @@ export async function fetchXai(ctx) {
           break;
         }
       }
-      state.xai = { periodStart: startIso, periodEnd: endIso, pct: creditPct, seenAt: new Date().toISOString() };
+      state.xai = { periodStart: startIso, periodEnd: endIso, pct: creditPct, seenAt: new Date().toISOString(), ...(resetUsed && { resetUsed }) };
       await writeUsageState(state);
     }
   } else {
