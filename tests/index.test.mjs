@@ -1557,3 +1557,14 @@ test("a non-list GLM limits or Grok productUsage does not blank the block", () =
     assert.equal(grok.length, 2);
   }
 }));
+
+test("a missing Grok on-demand reading is unavailable, never 0%", () => withState(async () => {
+  for (const onDemandUsed of [undefined, null, { val: null }, { val: "" }, { val: true }]) {
+    const lines = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 28, { onDemandCap: { val: 100 }, onDemandUsed }));
+    assert.match(lines.find((row) => row.includes("On-demand")), /window reported, reading unavailable$/);
+  }
+  const zero = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 28, { onDemandCap: { val: 100 }, onDemandUsed: { val: 0 } }));
+  assert.match(zero.find((row) => row.includes("On-demand")), / 0%$/);
+  const noCap = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 28, { onDemandCap: { val: null }, onDemandUsed: { val: null } }));
+  assert.ok(!noCap.some((row) => row.includes("On-demand")));
+}));

@@ -568,11 +568,12 @@ export async function fetchXai(ctx) {
     // Neither a limit nor a used figure means no plan on this account: the bare header reads as "no plan data".
   }
 
-  const onDemandCap = Number(config.onDemandCap?.val);
-  const onDemandUsed = Number(config.onDemandUsed?.val);
-  if (Number.isFinite(onDemandCap) && onDemandCap > 0) {
-    lines.push(line("On-demand", pct(onDemandUsed, onDemandCap)));
-  } else if (Number.isFinite(onDemandUsed) && onDemandUsed > 0) {
+  // A reported cap without a used reading is unavailable, not 0%.
+  const onDemandCap = reading(config.onDemandCap?.val);
+  const onDemandUsed = reading(config.onDemandUsed?.val);
+  if (onDemandCap > 0) {
+    lines.push(meter("On-demand", pct(onDemandUsed, onDemandCap)));
+  } else if (onDemandUsed > 0) {
     lines.push(plain("On-demand", `${onDemandUsed.toLocaleString()} used`));
   }
 
