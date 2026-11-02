@@ -1,9 +1,9 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   bar,
   clean,
@@ -1438,3 +1438,12 @@ test("missing percentages fall back to valid counts", async () => {
     assert.match(lines.find((row) => row.includes("MCP (month)")), /\s30% · 30\/100$/);
   });
 });
+
+test("state writes use their own temp file, so a stray or shared .tmp cannot block or mix them", () => withState(async (statePath) => {
+  mkdirSync(`${statePath}.tmp`); // the old fixed temp name, taken by another writer
+  await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 12), statePath);
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).xai.pct, 12);
+  await Promise.all([10, 20, 30, 40].map((value) => runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], value), statePath)));
+  assert.ok(Number.isFinite(JSON.parse(readFileSync(statePath, "utf8")).xai.pct));
+  assert.deepEqual(readdirSync(dirname(statePath)).sort(), ["state.json", "state.json.tmp"]);
+}));

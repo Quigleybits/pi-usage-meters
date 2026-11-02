@@ -8,7 +8,8 @@ const H5 = 5 * 3600e3;
 const D7 = 7 * 86400e3;
 const RESET_DROP_PCT = 5;
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -24,15 +25,18 @@ async function readUsageState() {
   }
 }
 
+// Each write gets its own temp file (pid + random suffix), so a pi session and the headless runner
+// never write into the same temp file; the rename keeps the replace atomic.
 async function writeUsageState(state) {
+  const path = stateFilePath();
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    const path = stateFilePath();
     await mkdir(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
     await writeFile(tmp, JSON.stringify(state));
     await rename(tmp, path);
   } catch {
     // State persistence is best-effort; /usage must never fail because of it.
+    await rm(tmp, { force: true }).catch(() => {});
   }
 }
 
