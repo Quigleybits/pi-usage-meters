@@ -444,7 +444,41 @@ test("Codex derives window labels, omits absent plan, and keeps one expiry per r
     assert.match(lines.join("\n"), /Session \(90m\)/);
     assert.match(lines.join("\n"), /Session \(1d\)/);
     assert.match(lines.join("\n"), /●● use by: 11 Aug, 11 Aug/);
+    assert.doesNotMatch(lines.join("\n"), /Credits/);
   });
+});
+
+test("Codex shows the usage credit balance separately from banked resets", async () => {
+  const ctx = authContext({ "openai-codex": oauth(jwt()) });
+  const usage = {
+    plan_type: "prolite",
+    rate_limit: { primary_window: { limit_window_seconds: 604800, used_percent: 46, reset_at: 1786500000 } },
+    rate_limit_reset_credits: { available_count: 1 },
+  };
+  const respond = (credits) => async (url) => json(String(url).endsWith("rate-limit-reset-credits")
+    ? { credits: [] }
+    : { ...usage, credits });
+  await withFetch(respond({ has_credits: true, unlimited: false, balance: "12345" }), async () => {
+    const lines = await fetchCodex(ctx);
+    assert.match(lines.join("\n"), /Credits\s+12,345 remaining/);
+    assert.match(lines.join("\n"), /Banked resets/);
+  });
+  await withFetch(respond({ has_credits: true, unlimited: false, balance: 12345.6 }), async () => {
+    assert.match((await fetchCodex(ctx)).join("\n"), /Credits\s+12,346 remaining/);
+  });
+  await withFetch(respond({ has_credits: true, unlimited: true, balance: "1" }), async () => {
+    const text = (await fetchCodex(ctx)).join("\n");
+    assert.match(text, /Credits\s+unlimited/);
+    assert.doesNotMatch(text, /1 remaining/);
+  });
+  await withFetch(respond({ has_credits: true, unlimited: false, balance: "0" }), async () => {
+    assert.match((await fetchCodex(ctx)).join("\n"), /Credits\s+0 remaining/);
+  });
+  for (const credits of [null, { has_credits: false, unlimited: false, balance: "80" }, { has_credits: true, balance: null }, { has_credits: true, balance: "n/a" }]) {
+    await withFetch(respond(credits), async () => {
+      assert.doesNotMatch((await fetchCodex(ctx)).join("\n"), /Credits/);
+    });
+  }
 });
 
 test("GLM parses API-key auth and splits credit windows by reset horizon", async () => {

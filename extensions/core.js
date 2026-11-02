@@ -398,6 +398,21 @@ export async function fetchAnthropic(ctx) {
   return lines;
 }
 
+function groupedCredits(value) {
+  return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+// Flexible-usage balance from the same usage payload. This is not the banked-reset inventory.
+function codexCreditText(credits) {
+  if (!credits || typeof credits !== "object" || Array.isArray(credits)) return;
+  if (credits.unlimited === true) return "unlimited";
+  if (credits.has_credits !== true) return;
+  const raw = credits.balance;
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  if (!Number.isFinite(value) || value < 0) return;
+  return `${groupedCredits(value)} remaining`;
+}
+
 export async function fetchCodex(ctx, { clock = Date.now } = {}) {
   const token = await tokenFor(ctx, "openai-codex");
   if (!token) throw noAuth("openai-codex");
@@ -411,6 +426,8 @@ export async function fetchCodex(ctx, { clock = Date.now } = {}) {
     const seconds = Number(window.limit_window_seconds) || 0;
     lines.push(line(windowLabel(seconds * 1000), window.used_percent, Number(window.reset_at) * 1000, seconds * 1000));
   }
+  const creditText = codexCreditText(usage.credits);
+  if (creditText) lines.push(plain("Credits", creditText));
   const banked = Math.max(0, Math.trunc(Number(usage.rate_limit_reset_credits?.available_count) || 0));
   if (banked > 0) {
     const visible = Math.min(20, banked);
@@ -419,7 +436,7 @@ export async function fetchCodex(ctx, { clock = Date.now } = {}) {
       "OpenAI-Beta": "codex-1",
       originator: "Codex Desktop",
     }, deadline - clock());
-    const dates = (credits?.credits ?? [])
+    const dates = (Array.isArray(credits?.credits) ? credits.credits : [])
       .filter((credit) => (credit.status ?? "available") === "available")
       .slice(0, visible)
       .map((credit) => fmtDay(parseTs(credit.expires_at ?? credit.expiresAt)))
