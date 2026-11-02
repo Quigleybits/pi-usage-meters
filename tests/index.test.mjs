@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -27,8 +27,20 @@ import {
 
 const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
-// All stateful Grok-detection tests must hit a throwaway state file, never the user's.
-process.env.PI_USAGE_METERS_STATE ||= join(mkdtempSync(join(tmpdir(), "pum-tests-")), "state.json");
+// All stateful Grok-detection tests must hit a throwaway state file, never the user's,
+// even when PI_USAGE_METERS_STATE is inherited. The inherited value comes back afterwards.
+const inheritedStatePath = process.env.PI_USAGE_METERS_STATE;
+const testStateDir = mkdtempSync(join(tmpdir(), "pum-tests-"));
+process.env.PI_USAGE_METERS_STATE = join(testStateDir, "state.json");
+after(() => {
+  if (inheritedStatePath === undefined) delete process.env.PI_USAGE_METERS_STATE;
+  else process.env.PI_USAGE_METERS_STATE = inheritedStatePath;
+  rmSync(testStateDir, { recursive: true, force: true });
+});
+
+test("tests write to a test-owned state file even when the variable is inherited", () => {
+  assert.ok(process.env.PI_USAGE_METERS_STATE.startsWith(join(tmpdir(), "pum-tests-")));
+});
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {

@@ -1,10 +1,18 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.PI_USAGE_METERS_STATE = join(mkdtempSync(join(tmpdir(), "usage-json-")), "state.json");
+// Always a test-owned state file, even when PI_USAGE_METERS_STATE is inherited; restore it afterwards.
+const inheritedStatePath = process.env.PI_USAGE_METERS_STATE;
+const testStateDir = mkdtempSync(join(tmpdir(), "usage-json-"));
+process.env.PI_USAGE_METERS_STATE = join(testStateDir, "state.json");
+after(() => {
+  if (inheritedStatePath === undefined) delete process.env.PI_USAGE_METERS_STATE;
+  else process.env.PI_USAGE_METERS_STATE = inheritedStatePath;
+  rmSync(testStateDir, { recursive: true, force: true });
+});
 const NOW = Date.parse("2026-11-02T10:00:00Z");
 const iso = (hours) => new Date(NOW + hours * 3600000).toISOString();
 const secret = "synthetic-credential-must-never-appear";
