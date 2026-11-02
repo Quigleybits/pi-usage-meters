@@ -608,6 +608,19 @@ test("Kimi parses bearer-auth membership and session and weekly quotas", async (
   });
 });
 
+test("a non-array limits field does not blank the Claude or Kimi block", async () => {
+  for (const limits of [{}, "weekly", 7]) {
+    await withFetch(claudeFetch({ seven_day: { utilization: 25, resets_at: inHours(72) }, limits }), async () => {
+      const lines = await fetchAnthropic(authContext({ anthropic: oauth() }));
+      assert.match(lines.join("\n"), /Week \(all models\).*25%/);
+    });
+    await withFetch(async () => json({ limits, usage: { used: 45, limit: 300, resetTime: "2030-08-15T12:00:00Z" } }), async () => {
+      const lines = await fetchKimi(authContext({ "kimi-coding": oauth() }));
+      assert.match(lines.join("\n"), /Week.*15%/);
+    });
+  }
+});
+
 test("Grok parses weekly credits, monthly fallback, and product split", async () => {
   const ctx = authContext({ xai: oauth("grok-token") });
   let mode = "weekly";

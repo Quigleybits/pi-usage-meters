@@ -340,7 +340,7 @@ export async function fetchAnthropic(ctx) {
   if (usage.seven_day) {
     lines.push(line("Week (all models)", usage.seven_day.utilization, Date.parse(usage.seven_day.resets_at), D7));
   }
-  for (const limit of (usage.limits ?? []).slice(0, 10)) {
+  for (const limit of (Array.isArray(usage.limits) ? usage.limits : []).slice(0, 10)) {
     if (limit.group === "weekly" && limit.scope?.model?.display_name) {
       lines.push(line(`Week (${limit.scope.model.display_name})`, limit.percent, Date.parse(limit.resets_at), D7));
     }
@@ -420,7 +420,7 @@ export async function fetchKimi(ctx) {
   const usage = await getJson("https://api.kimi.com/coding/v1/usages", token);
   const level = clean(String(usage.user?.membership?.level ?? "").replace(/^LEVEL_/i, ""), 40).toLowerCase();
   const lines = [header("Kimi", level)];
-  const five = (usage.limits ?? []).slice(0, 10).find((limit) => limit.window?.timeUnit === "TIME_UNIT_MINUTE");
+  const five = (Array.isArray(usage.limits) ? usage.limits : []).slice(0, 10).find((limit) => limit?.window?.timeUnit === "TIME_UNIT_MINUTE");
   if (five?.detail) {
     const windowMs = (Number(five.window?.duration) || 300) * 60e3;
     lines.push(line(windowLabel(windowMs), pct(five.detail.used, five.detail.limit), Date.parse(five.detail.resetTime), windowMs));
