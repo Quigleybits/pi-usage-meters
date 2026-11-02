@@ -1568,3 +1568,37 @@ test("a missing Grok on-demand reading is unavailable, never 0%", () => withStat
   const noCap = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 28, { onDemandCap: { val: null }, onDemandUsed: { val: null } }));
   assert.ok(!noCap.some((row) => row.includes("On-demand")));
 }));
+
+// ---- Rendered layout: what pi shows, colours removed ----
+
+const renderedRows = (data) => renderContent(data).replace(/\x1b\[[0-9;]*m/g, "").split("\n");
+const indentOf = (row) => row.length - row.trimStart().length;
+const barColumn = (row) => row.search(/[█░]/);
+
+test("rendered rows sit 2 spaces under the header, Grok slices 4, with every bar in one column", () => withState(async () => {
+  const claude = await withFetch(
+    claudeFetch({ five_hour: { utilization: 37, resets_at: inHours(2) }, seven_day: week, extra_usage: { credits_ever_enabled: true, is_enabled: false, used_credits: 0, monthly_limit: 2000, currency: "GBP" } }, pro),
+    () => fetchAnthropic(authContext({ anthropic: oauth() })),
+  );
+  const sliced = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 28, {
+    productUsage: [{ product: "GrokBot", usagePercent: 23 }, { product: "Api", usagePercent: 5 }],
+  }));
+  const mismatched = await runGrokFetch(grokBilling(PERIOD_B[0], PERIOD_B[1], 17, {
+    productUsage: [{ product: "GrokBot", usagePercent: 10 }, { product: "Imagine", usagePercent: 2 }],
+  }));
+  for (const [lines, slices] of [[claude, []], [sliced, ["Bot", "Grok API"]], [mismatched, []]]) {
+    const [header, ...body] = renderedRows({ blocks: [{ name: "Grok", lines }] });
+    assert.equal(indentOf(header), 0, header);
+    for (const row of body) {
+      const slice = slices.some((name) => row.trimStart().startsWith(`${name} `));
+      assert.equal(indentOf(row), slice ? 4 : 2, row);
+    }
+    const bars = body.filter((row) => barColumn(row) >= 0);
+    assert.ok(bars.length >= 2);
+    assert.equal(new Set(bars.map(barColumn)).size, 1, bars.join("\n"));
+  }
+  // Status notes and the footer stay flush left.
+  const rows = renderedRows({ blocks: [{ name: "Grok", lines: sliced }, { name: "Kimi", status: "nodata" }], fetchedAt: "2026-11-02T10:00:00Z" });
+  assert.deepEqual(rows.slice(-2).map(indentOf), [0, 0]);
+  assert.equal(rows.at(-2), "Kimi: no plan data");
+}));

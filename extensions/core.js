@@ -113,12 +113,15 @@ export function pie(windowMs, resetMs) {
   return PIE[Math.round((1 - remaining) * (PIE.length - 1))];
 }
 
-// A leading run of spaces is an intentional indent (e.g. Grok product slices); keep it inside LABEL_W.
-const field = (label) => {
-  const text = String(label ?? "");
-  const indent = /^ */.exec(text)[0].slice(0, LABEL_W);
-  return (indent + clean(text, LABEL_W - indent.length)).padEnd(LABEL_W);
-};
+// clean() that keeps a leading run of spaces: that run is an intentional indent (rows under their
+// header, Grok product slices) and counts inside max. The rest is cleaned as usual.
+function cleanKeepIndent(value, max = 200) {
+  const text = String(value ?? "");
+  const indent = /^ */.exec(text)[0].slice(0, max);
+  return indent + clean(text, max - indent.length);
+}
+
+const field = (label) => cleanKeepIndent(label, LABEL_W).padEnd(LABEL_W);
 
 export function line(label, value, resetMs, windowMs) {
   const usedPct = clampPct(value);
@@ -953,7 +956,10 @@ export function renderContent(data) {
     const color = Object.hasOwn(COLORS, name) ? COLORS[name] : "";
     const lines = Array.isArray(block?.lines) ? block.lines.slice(0, 20) : [];
     if (lines.length) {
-      out.push(...lines.map((value) => `${color}${clean(value, MAX_RENDER_LINE)}${RESET}`));
+      // The header stays flush left; rows keep their indent so bars line up under it.
+      out.push(...lines.map((value, index) => (
+        `${color}${index === 0 ? clean(value, MAX_RENDER_LINE) : cleanKeepIndent(value, MAX_RENDER_LINE)}${RESET}`
+      )));
       continue;
     }
     const status = clean(block?.status, 20);
