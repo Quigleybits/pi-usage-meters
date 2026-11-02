@@ -1,21 +1,10 @@
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { createUsageLoader, cursorLogin, cursorRefresh, renderContent } from "./core.js";
+import { createUsageLoader, renderContent } from "./core.js";
 
 export default function (pi) {
   // readStoredCredential is pi's public one-off credential read; the Copilot meter is its only consumer.
   const loadUsage = createUsageLoader({ readCredential: readStoredCredential });
-
-  // Grok Bot auth is a Cursor login. The loader omits that block when it is the same SuperGrok
-  // pool already shown under Grok. The login still matters for a separate grant.
-  pi.registerProvider("cursor", {
-    oauth: {
-      name: "Cursor (Grok Bot)",
-      login: async (callbacks) => cursorLogin({ onAuth: callbacks.onAuth }),
-      refreshToken: (credentials, signal) => cursorRefresh(credentials, { signal }),
-      getApiKey: (credentials) => credentials.access,
-    },
-  });
 
   pi.registerEntryRenderer("provider-usage", (entry) => (
     new Text(renderContent(entry.data), 0, 0)

@@ -10,20 +10,15 @@ import {
   clampPct,
   codexAccountId,
   createUsageLoader,
-  cursorChecksum,
-  cursorLogin,
-  cursorRefresh,
   fetchAnthropic,
   fetchCodex,
   fetchCopilot,
-  fetchCursor,
   fetchGlm,
   fetchKimi,
   fetchMinimax,
   fetchXai,
   getJson,
   line,
-  NotConnected,
   pie,
   renderContent,
   STAMP,
@@ -818,7 +813,7 @@ test("loader marks header-only providers as no plan data and missing logins as u
     assert.match(glm.hint, /ZAI_API_KEY/);
     assert.doesNotMatch(JSON.stringify(data), /not logged in|API key not set/);
     assert.match(renderContent(data), /Claude: no plan data/);
-    assert.match(renderContent(data), /not connected: Codex · Kimi · Grok · Grok Bot · Copilot · GLM · MiniMax\x1b/);
+    assert.match(renderContent(data), /not connected: Codex · Kimi · Grok · Copilot · GLM · MiniMax\x1b/);
   });
 });
 
@@ -1193,9 +1188,9 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   const load = createUsageLoader();
   const [a, b] = await Promise.all([load(ctx), load(ctx)]);
   assert.equal(a, b);
-  assert.equal(resolutions, 10); // 6 OAuth + zai/zai-coding-cn + minimax/minimax-cn
+  assert.equal(resolutions, 9); // 5 OAuth + zai/zai-coding-cn + minimax/minimax-cn
   assert.equal(await load(ctx), a);
-  assert.equal(resolutions, 10);
+  assert.equal(resolutions, 9);
 });
 
 test("package manifest limits files and includes community metadata", () => {
@@ -1310,233 +1305,27 @@ test("Grok: explicit reset-count fields are rendered when xAI ever exposes them"
   assert.doesNotMatch(lines.join("\n"), /Reset used/);
 }));
 
-// ---- Grok Bot (Cursor-metered) ----
+// ---- Grok: xAI is the only source ----
 
-test("cursorChecksum matches the app algorithm shape", () => {
-  const checksum = cursorChecksum("machine-1", 1_788_000_000_000);
-  assert.match(checksum, /^[A-Za-z0-9_-]{8}machine-1$/); // base64url(6 bytes) + machineId
-  // Same epoch-minute is stable; the next 1e6-ms tick changes the prefix.
-  assert.equal(cursorChecksum("machine-1", 1_788_000_000_000), checksum);
-  assert.notEqual(cursorChecksum("machine-1", 1_788_000_000_000 + 1e6).slice(0, 8), checksum.slice(0, 8));
-  // Reference vectors computed against the app's own code path (byte-for-byte).
-  assert.equal(cursorChecksum("m", 0), "paaoq6-0m");
-  assert.equal(cursorChecksum("machine-1", 1_788_000_000_000), "paaotgJnmachine-1");
-});
+test("Grok product rows that sum to the week render as Bot and Grok API", () => withState(async () => {
+  const lines = await runGrokFetch(grokBilling("2030-08-05T01:10:27.629+00:00", "2030-08-12T01:10:27.629+00:00", 28, {
+    productUsage: [
+      { product: "GrokBot", usagePercent: 23 },
+      { product: "Api", usagePercent: 5 },
+    ],
+  }));
+  const row = (label) => lines.find((text) => text.trimStart().startsWith(`${label} `));
+  assert.match(row("Week (credits)"), /\s28% reset /);
+  assert.match(row("Bot"), /\s23%$/);
+  assert.match(row("Grok API"), /\s5%$/);
+}));
 
-test("cursorLogin polls 404 then returns tokens", async () => {
-  const seen = [];
-  let polls = 0;
-  const accessToken = `h.${Buffer.from(JSON.stringify({ exp: 4_102_444_800 })).toString("base64url")}.s`;
-  await withFetch(async (url) => {
-    seen.push(String(url));
-    if (String(url).includes("/auth/poll")) {
-      polls += 1;
-      if (polls < 3) return new Response("{}", { status: 404 });
-      return json({ accessToken, refreshToken: "refresh-1" });
+test("the loader has no Grok Bot block and never asks for a Cursor login", async () => {
+  await withFetch(async (url) => { throw new Error(`unexpected request ${url}`); }, async () => {
+    const data = await createUsageLoader({})({ modelRegistry: { getProviderAuth: async () => undefined } }, true);
+    assert.deepEqual(data.blocks.map((block) => block.name), ["Claude", "Codex", "Kimi", "Grok", "Copilot", "GLM", "MiniMax"]);
+    for (const rendered of [renderContent(data), renderContent({ ...data, all: true })]) {
+      assert.doesNotMatch(rendered, /Grok Bot|\/login cursor/i);
     }
-    return json({});
-  }, async () => {
-    const auth = await cursorLogin({ onAuth: (p) => seen.push(p.url), sleep: async () => {} });
-    assert.equal(auth.access, accessToken);
-    assert.equal(auth.refresh, "refresh-1");
-    assert.equal(auth.expires, 4_102_444_800 * 1000);
-    assert.equal(polls, 3);
-    const loginUrl = seen.find((u) => u.startsWith("https://cursor.com/loginDeepControl"));
-    assert.ok(loginUrl, "browser url opened");
-    assert.match(loginUrl, /challenge=[A-Za-z0-9_-]{43}/); // base64url(sha256) of 32-byte verifier
-    assert.match(loginUrl, /uuid=[0-9a-f-]{36}/);
-    assert.match(loginUrl, /redirectTarget=sand/);
   });
-});
-
-test("cursorLogin gives up after three consecutive poll errors", async () => {
-  await withFetch(async () => new Response("{}", { status: 500 }), async () => {
-    await assert.rejects(
-      () => cursorLogin({ onAuth: () => {}, sleep: async () => {} }),
-      /login poll failed|login poll unreachable/,
-    );
-  });
-});
-
-test("cursorRefresh rotates the pair and falls back to the old refresh token", async () => {
-  let body = null;
-  await withFetch(async (url, init) => {
-    body = JSON.parse(init.body);
-    return json({ access_token: "new-access", refresh_token: "new-refresh" });
-  }, async () => {
-    const rotated = await cursorRefresh({ access: "a", refresh: "old-refresh" });
-    assert.equal(rotated.access, "new-access");
-    assert.equal(rotated.refresh, "new-refresh");
-    assert.ok(rotated.expires > Date.now());
-    assert.equal(body.client_id, "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB");
-    assert.equal(body.grant_type, "refresh_token");
-    assert.equal(body.refresh_token, "old-refresh");
-  });
-  await withFetch(async () => json({ access_token: "new-access" }), async () => {
-    const kept = await cursorRefresh({ access: "a", refresh: "old-refresh" });
-    assert.equal(kept.refresh, "old-refresh");
-  });
-  await withFetch(async () => new Response("{}", { status: 401 }), async () => {
-    await assert.rejects(() => cursorRefresh({ refresh: "r" }), /HTTP 401/);
-  });
-});
-
-test("fetchCursor labels Grok Bot by credit source", async () => {
-  const ctx = authContext({ cursor: oauth("cursor-token") });
-  let request = null;
-  await withFetch(async (url, init) => {
-    request = { url: String(url), init };
-    return json({
-      currentPeriodStart: { seconds: "2049244800", nanos: 0 },
-      nextResetTimestampUtc: { seconds: "2049849600", nanos: 0 },
-      usagePercent: 61,
-      availableBankedResetCount: "2",
-      includedUsageSuperGrokPlan: "super_grok",
-      grokPlanLabel: "SuperGrok",
-      onDemandSettings: { visible: true, eligible: true, enabled: true },
-    });
-  }, async () => {
-    const lines = await fetchCursor(ctx);
-    assert.equal(lines[0], "Grok Bot (SuperGrok)");
-    assert.match(lines.join("\n"), /Week.*61%/);
-    assert.match(lines.join("\n"), /Resets\s+2 available/);
-    assert.match(lines.join("\n"), /On-demand\s+enabled/);
-    assert.ok(request.url.endsWith("/aiserver.v1.DashboardService/GetSandUsageStatus"));
-    assert.equal(request.init.method, "POST");
-    assert.match(request.init.headers["x-cursor-checksum"], /^[A-Za-z0-9_-]{8}/);
-  });
-  // A plan label does not identify the source of Cursor-funded credits.
-  await withFetch(async () => json({
-    currentPeriodStart: { seconds: "2049244800", nanos: 0 },
-    nextResetTimestampUtc: { seconds: "2049849600", nanos: 0 },
-    usagePercent: 24,
-    grokPlanLabel: "SuperGrok",
-  }), async () => {
-    const lines = await fetchCursor(ctx);
-    assert.equal(lines[0], "Grok Bot (Cursor)");
-    assert.match(lines.join("\n"), /Week.*24%/);
-  });
-  // Enterprise pooled allowance renders without a percent bar; trial date pinned.
-  await withFetch(async () => json({
-    usesPooledEnterpriseAllowance: true,
-    sandTrialExpiresAt: { seconds: "4102444800", nanos: 0 },
-  }), async () => {
-    const lines = await fetchCursor(ctx);
-    assert.equal(lines[0], "Grok Bot (Cursor)");
-    assert.match(lines.join("\n"), /pooled team allowance/);
-    assert.match(lines.join("\n"), /Trial\s+ends/);
-    assert.ok(!/Week/.test(lines.join("\n")));
-  });
-  // No credential → not connected, never a network call.
-  await withFetch(async () => { throw new Error("network must not be called"); }, async () => {
-    await assert.rejects(() => fetchCursor(authContext({})), (error) => error instanceof NotConnected && error.hint === "/login cursor");
-  });
-});
-
-test("fetchCursor reads an ISO Grok-billed period without calling it Cursor", async () => {
-  const ctx = authContext({ cursor: oauth("cursor-token") });
-  await withFetch(async () => json({
-    currentPeriodStart: "2030-08-05T00:00:00.000Z",
-    nextResetTimestampUtc: "2030-08-12T00:00:00.000Z",
-    usagePercent: 28.479,
-    billingBrand: "SAND_BILLING_BRAND_GROK",
-    grokPlanLabel: "Grok Bot Plan",
-    cursorPlanName: "Super",
-  }), async () => {
-    const lines = await fetchCursor(ctx);
-    assert.equal(lines[0], "Grok Bot");
-    assert.match(lines.join("\n"), /Week.*28%/);
-    assert.match(lines.join("\n"), /reset/);
-    assert.doesNotMatch(lines.join("\n"), /Cursor/);
-  });
-});
-
-test("a Grok Bot reading of the same weekly pool is not a second block", async () => {
-  const ctx = authContext({ xai: oauth("grok-token"), cursor: oauth("cursor-token") });
-  const period = ["2030-08-05T01:10:27.629+00:00", "2030-08-12T01:10:27.629+00:00"];
-  await withFetch(async (url) => {
-    const href = String(url);
-    if (href.endsWith("/settings")) return json({ subscription_tier_display: "SuperGrok Plus" });
-    if (href.includes("/billing")) {
-      return json({
-        config: {
-          currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", start: period[0], end: period[1] },
-          creditUsagePercent: 28,
-          isUnifiedBillingUser: true,
-          productUsage: [
-            { product: "GrokBot", usagePercent: 23 },
-            { product: "Api", usagePercent: 5 },
-          ],
-        },
-      });
-    }
-    if (href.endsWith("/GetSandUsageStatus")) {
-      return json({
-        currentPeriodStart: "2030-08-05T01:10:27.629Z",
-        nextResetTimestampUtc: "2030-08-12T01:10:27.629Z",
-        usagePercent: 28.479,
-        isUnified: true,
-        billingBrand: "SAND_BILLING_BRAND_GROK",
-        availableBankedResetCount: 2,
-      });
-    }
-    throw new Error(`unexpected ${href}`);
-  }, async () => {
-    const data = await createUsageLoader()(ctx, true);
-    assert.equal(data.blocks.some((block) => block.name === "Grok Bot"), false);
-    const text = data.blocks.find((block) => block.name === "Grok").lines.join("\n");
-    assert.match(text, /Week \(credits\).*28%/);
-    assert.match(text, /Bot\s+.*23%/);
-    assert.match(text, /Grok API\s+.*5%/);
-    // 23% + 5% = the 28% week, so the products are slices of it and indent 2 spaces deeper.
-    const rows = data.blocks.find((block) => block.name === "Grok").lines;
-    assert.match(rows.find((row) => row.trimStart().startsWith("Week (credits) ")), /^  Week \(credits\) /);
-    assert.match(rows.find((row) => row.trimStart().startsWith("Bot ")), /^    Bot /);
-    assert.match(rows.find((row) => row.trimStart().startsWith("Grok API ")), /^    Grok API /);
-    assert.match(text, /Resets\s+2 available/);
-    assert.doesNotMatch(renderContent(data), /Grok Bot/);
-  });
-});
-
-test("a Grok Bot reading from a different period stays visible", async () => {
-  const ctx = authContext({ xai: oauth("grok-token"), cursor: oauth("cursor-token") });
-  await withFetch(async (url) => {
-    const href = String(url);
-    if (href.endsWith("/settings")) return json({ subscription_tier_display: "SuperGrok" });
-    if (href.includes("/billing")) {
-      return json({
-        config: {
-          currentPeriod: {
-            type: "USAGE_PERIOD_TYPE_WEEKLY",
-            start: "2030-08-05T00:00:00Z",
-            end: "2030-08-12T00:00:00Z",
-          },
-          creditUsagePercent: 28,
-          isUnifiedBillingUser: true,
-          productUsage: [{ product: "GrokBot", usagePercent: 28 }],
-        },
-      });
-    }
-    if (href.endsWith("/GetSandUsageStatus")) {
-      return json({
-        currentPeriodStart: "2030-08-12T00:00:00Z",
-        nextResetTimestampUtc: "2030-08-19T00:00:00Z",
-        usagePercent: 28,
-      });
-    }
-    throw new Error(`unexpected ${href}`);
-  }, async () => {
-    const data = await createUsageLoader()(ctx, true);
-    const bot = data.blocks.find((block) => block.name === "Grok Bot");
-    assert.equal(bot.lines[0], "Grok Bot (Cursor)");
-    assert.match(bot.lines.join("\n"), /Week.*28%/);
-  });
-});
-
-test("Grok Bot is wired into the footer like every other provider", async () => {
-  const data = await createUsageLoader({})({ modelRegistry: { getProviderAuth: async () => undefined } }, true);
-  const block = data.blocks.find((entry) => entry.name === "Grok Bot");
-  assert.equal(block.status, "unconnected");
-  assert.equal(block.hint, "/login cursor");
-  assert.match(renderContent(data), /Grok Bot: \/login cursor/);
 });
