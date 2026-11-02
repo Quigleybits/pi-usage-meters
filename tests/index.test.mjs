@@ -1465,3 +1465,24 @@ test("Grok: a detected reset stays visible for the rest of its period and a new 
   });
   assert.ok(!damaged.some((row) => row.includes("Reset used")));
 }));
+
+test("a credential lookup that never settles times out without holding the other providers", { timeout: 3000 }, async () => {
+  const never = () => new Promise(() => {});
+  const ctx = {
+    modelRegistry: {
+      getProviderAuth: async (provider) => {
+        if (provider === "anthropic") return never();
+        if (provider === "github-copilot") return { source: "OAuth", auth: { apiKey: "session" } };
+        return undefined;
+      },
+    },
+  };
+  const data = await createUsageLoader({ readCredential: never, deadlineMs: 50 })(ctx, true);
+  for (const name of ["Claude", "Copilot"]) {
+    const block = data.blocks.find((entry) => entry.name === name);
+    assert.equal(block.status, "error");
+    assert.equal(block.detail, "timed out");
+  }
+  assert.equal(data.blocks.find((entry) => entry.name === "Codex").status, "unconnected");
+  assert.match(renderContent(data), /Claude: timed out/);
+});

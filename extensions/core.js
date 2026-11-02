@@ -1,4 +1,6 @@
 const TIMEOUT_MS = 8_000;
+// Whole-provider backstop: credential lookup plus requests. Requests keep their own 8 s cap inside it.
+const PROVIDER_DEADLINE_MS = TIMEOUT_MS + 2_000;
 const OPTIONAL_TIMEOUT_MS = 2_500;
 const CACHE_MS = 60_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -837,10 +839,22 @@ function describeError(error) {
 // Block shapes: { name, lines } when the provider is connected and reported at least one meter;
 // otherwise { name, status, hint | detail } with status unconnected | rejected | nodata | error.
 // Status blocks never render as blocks — renderContent folds them into one dim footer line.
+// Settles with the promise, or rejects with the standard "timed out" error once ms pass.
+function withDeadline(promise, ms) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 async function fetchAll(ctx, deps) {
+  const deadlineMs = deps?.deadlineMs ?? PROVIDER_DEADLINE_MS;
   return Promise.all(FETCHERS.map(async ([name, fetcher, login]) => {
     try {
-      const lines = await fetcher(ctx, deps);
+      // One deadline per provider, credential lookup included: a stalled login refresh or credential
+      // read cannot hold the other blocks.
+      const lines = await withDeadline(fetcher(ctx, deps), deadlineMs);
       if (lines.length <= 1) return { name, status: "nodata" };
       return { name, lines };
     } catch (error) {
@@ -859,7 +873,8 @@ async function fetchAll(ctx, deps) {
   }));
 }
 
-// deps: { readCredential } — pi's readStoredCredential, supplied by the adapter (tests inject a stub).
+// deps: { readCredential } — pi's readStoredCredential, supplied by the adapter (tests inject a stub);
+// tests may also set deadlineMs to shorten the per-provider deadline.
 export function createUsageLoader(deps = {}) {
   let cache;
   let inFlight;
