@@ -17,7 +17,7 @@ const NOW = Date.parse("2026-11-02T10:00:00Z");
 const iso = (hours) => new Date(NOW + hours * 3600000).toISOString();
 const secret = "synthetic-credential-must-never-appear";
 
-async function collect({ auth, usage = {}, codex = {}, grok = {}, status = {} } = {}) {
+async function collect({ auth, usage = {}, codex = {}, grok = {}, status = {}, deadlineMs } = {}) {
   const originalFetch = globalThis.fetch;
   const originalNow = Date.now;
   Date.now = () => NOW;
@@ -43,7 +43,7 @@ async function collect({ auth, usage = {}, codex = {}, grok = {}, status = {} } 
   try {
     const { usageJson } = await import("../scripts/usage-json.mjs");
     const modelRegistry = { getProviderAuth: auth ?? (async () => ({ source: "OAuth", auth: { apiKey: secret } })) };
-    return await usageJson(modelRegistry);
+    return await usageJson(modelRegistry, deadlineMs === undefined ? undefined : { deadlineMs });
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalNow;
@@ -112,4 +112,33 @@ test("a missing weekly percentage is an error, never a full or empty meter", asy
     { name: "Codex", error: "weekly usage not shown" },
     { name: "Grok", error: "weekly usage not shown" },
   ]);
+});
+
+test("a stalled login lookup times out without holding the other providers", { timeout: 3000 }, async () => {
+  const data = await collect({
+    deadlineMs: 50,
+    auth: async (provider) => provider === "anthropic" ? new Promise(() => {}) : { source: "OAuth", auth: { apiKey: secret } },
+  });
+  assert.deepEqual(data.providers[0], { name: "Claude", error: "timed out" });
+  assert.equal(data.providers[1].left, 21);
+  assert.equal(data.providers[2].left, 84);
+});
+
+test("login refresh failures that are not an expiry use the same plain words as /usage", async () => {
+  const networkCause = Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+  const failures = {
+    anthropic: new Error("OAuth refresh failed for anthropic: fetch failed", { cause: networkCause }),
+    "openai-codex": new Error("OAuth refresh failed for openai-codex: OpenAI Codex token refresh failed (429): Too Many Requests"),
+    xai: new Error("OAuth refresh failed for xai: xAI OAuth token refresh failed (HTTP 503)"),
+  };
+  const data = await collect({ auth: async (provider) => { throw failures[provider]; } });
+  assert.deepEqual(data.providers, [
+    { name: "Claude", error: "network error" },
+    { name: "Codex", error: "rate limited" },
+    { name: "Grok", error: "provider error" },
+  ]);
+  const timeout = Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+  const again = await collect({ auth: async () => { throw new Error("OAuth refresh failed for anthropic: aborted", { cause: timeout }); } });
+  assert.deepEqual(again.providers[0], { name: "Claude", error: "timed out" });
+  assert.ok(!JSON.stringify([data, again]).includes(secret));
 });

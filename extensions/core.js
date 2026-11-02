@@ -1,6 +1,6 @@
 const TIMEOUT_MS = 8_000;
 // Whole-provider backstop: credential lookup plus requests. Requests keep their own 8 s cap inside it.
-const PROVIDER_DEADLINE_MS = TIMEOUT_MS + 2_000;
+export const PROVIDER_DEADLINE_MS = TIMEOUT_MS + 2_000;
 const OPTIONAL_TIMEOUT_MS = 2_500;
 const CACHE_MS = 60_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -884,7 +884,7 @@ const LOGIN_FAILURE_DETAIL = {
 };
 
 // Settles with the promise, or rejects with the standard "timed out" error once ms pass.
-function withDeadline(promise, ms) {
+export function withDeadline(promise, ms) {
   let timer;
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
