@@ -1,7 +1,8 @@
 // Headless weekly meters. pi alone reads, refreshes and stores OAuth credentials.
 import { execSync } from "node:child_process";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { fetchAnthropic, fetchCodex, fetchXai, LoginFailed, NotConnected, PROVIDER_DEADLINE_MS, withDeadline } from "../extensions/core.js";
 
 const PROVIDERS = [["Claude", fetchAnthropic, "Week (all models)"], ["Codex", fetchCodex, "Week"], ["Grok", fetchXai, "Week (credits)"]];
@@ -31,17 +32,30 @@ export async function usageJson(modelRegistry, { deadlineMs = PROVIDER_DEADLINE_
   return { providers, fetchedAt: new Date(Date.now()).toISOString() };
 }
 
+// The npm global root, looked up from this script's own folder: cmd.exe searches the current folder
+// before PATH, so an npm.cmd planted in the caller's folder must never be in reach.
+const npmGlobalRoot = () => execSync("npm root -g", {
+  cwd: dirname(fileURLToPath(import.meta.url)),
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+}).trim();
+
+// pi's SDK, imported only by absolute file URL from the npm global root. A bare import would also
+// search node_modules in every parent folder up to the drive root, where any local user can create one.
+export async function loadPiSdk({ globalRoot = npmGlobalRoot } = {}) {
+  const root = realpathSync(globalRoot());
+  const entry = realpathSync(join(root, "@earendil-works", "pi-coding-agent", "dist", "index.js"));
+  const inside = relative(root, entry);
+  if (!inside || isAbsolute(inside) || inside.split(/[\\/]/)[0] === "..") throw new Error("pi is not under the npm global root");
+  return import(pathToFileURL(entry).href);
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   // Exit as soon as the output is written: a provider call that outlived its deadline must not
   // keep the runner (and so `cos usage`) alive.
   const finish = (stream, text) => stream.write(text, () => process.exit());
   try {
-    let sdk;
-    try { sdk = await import("@earendil-works/pi-coding-agent"); }
-    catch {
-      const root = execSync("npm root -g", { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-      sdk = await import(pathToFileURL(join(root, "@earendil-works/pi-coding-agent/dist/index.js")).href);
-    }
+    const sdk = await loadPiSdk();
     const registry = new sdk.ModelRegistry(await sdk.ModelRuntime.create({ allowModelNetwork: false }));
     finish(process.stdout, JSON.stringify(await usageJson(registry)) + "\n");
   } catch {
