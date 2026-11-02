@@ -694,17 +694,23 @@ function minimaxWindow(reported, total, remainingPercent, boostPermille, status)
 }
 
 export async function fetchMinimax(ctx) {
+  // sk-api- keys are pay-as-you-go secret keys with no plan behind them: nothing to meter and no
+  // request made with them. Selection skips them, so a China-region plan key still meters; among
+  // plan keys the global one keeps precedence.
   let auth;
+  let payAsYouGo = false;
   for (const config of MINIMAX_PROVIDERS) {
     const key = await apiKeyFor(ctx, config.provider).catch(() => undefined);
-    if (key) {
-      auth = { ...config, key };
-      break;
+    if (!key) continue;
+    if (key.startsWith("sk-api-")) {
+      payAsYouGo = true;
+      continue;
     }
+    auth = { ...config, key };
+    break;
   }
+  if (!auth && payAsYouGo) throw new NotConnected("pay-as-you-go key — no plan to meter");
   if (!auth) throw new NotConnected("set MINIMAX_API_KEY or MINIMAX_CN_API_KEY");
-  // sk-api- keys are pay-as-you-go secret keys with no plan behind them: nothing to meter, no request made.
-  if (auth.key.startsWith("sk-api-")) throw new NotConnected("pay-as-you-go key — no plan to meter");
   const res = await getJson(`${auth.host}/v1/token_plan/remains`, auth.key);
   const code = Number(res?.base_resp?.status_code ?? 0);
   if (code === 1004 || code === 2049) { // in-band auth failures (login fail / invalid api key) → "API key rejected"

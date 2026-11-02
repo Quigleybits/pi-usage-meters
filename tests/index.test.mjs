@@ -1530,3 +1530,18 @@ test("a refresh failure from the network, a 5xx or a 429 is not a login expiry",
   assert.equal(block("Grok").hint, "login expired (/login xai)");
   assert.equal(block("Kimi").hint, "login expired (/login kimi-coding)");
 });
+
+test("MiniMax skips a pay-as-you-go key and meters a China-region plan key; plan keys keep global first", async () => {
+  const seen = [];
+  const capture = async (url, init) => {
+    seen.push([new URL(String(url)).host, init.headers.Authorization]);
+    return json(minimaxFixture());
+  };
+  const apiKey = (key) => ({ source: "apiKey", auth: { apiKey: key } });
+  await withFetch(capture, async () => {
+    const lines = await fetchMinimax(authContext({ minimax: apiKey("sk-api-payg"), "minimax-cn": apiKey("cn-plan-key") }));
+    assert.equal(lines[0], "MiniMax (token plan)");
+    await fetchMinimax(authContext({ minimax: apiKey("global-plan-key"), "minimax-cn": apiKey("cn-plan-key") }));
+  });
+  assert.deepEqual(seen, [["api.minimaxi.com", "Bearer cn-plan-key"], ["api.minimax.io", "Bearer global-plan-key"]]);
+});
