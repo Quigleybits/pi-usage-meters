@@ -1545,3 +1545,15 @@ test("MiniMax skips a pay-as-you-go key and meters a China-region plan key; plan
   });
   assert.deepEqual(seen, [["api.minimaxi.com", "Bearer cn-plan-key"], ["api.minimax.io", "Bearer global-plan-key"]]);
 });
+
+test("a non-list GLM limits or Grok productUsage does not blank the block", () => withState(async () => {
+  for (const value of [{}, 7, "limits"]) {
+    await withFetch(async () => json({ data: { level: "lite", limits: value } }), async () => {
+      const lines = await fetchGlm(authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } }));
+      assert.deepEqual(lines, ["GLM (lite plan)"]);
+    });
+    const grok = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 28, { productUsage: value }));
+    assert.match(grok.find((row) => row.includes("Week (credits)")), /28%/);
+    assert.equal(grok.length, 2);
+  }
+}));

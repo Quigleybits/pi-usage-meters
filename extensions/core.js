@@ -521,7 +521,7 @@ export async function fetchXai(ctx) {
 
   if (weekly) {
     lines.push(meter("Week (credits)", creditPct, end, periodMs));
-    const products = (config.productUsage ?? []).slice(0, 8).flatMap((product) => {
+    const products = (Array.isArray(config.productUsage) ? config.productUsage : []).slice(0, 8).flatMap((product) => {
       const productPct = reading(product?.usagePercent);
       return Number.isFinite(productPct) ? [{ name: grokProductLabel(product.product), pct: productPct }] : [];
     });
@@ -622,7 +622,7 @@ export async function fetchGlm(ctx) {
     const t = reading(total);
     return Number.isFinite(c) && Number.isFinite(t) && t > 0 ? ` · ${c.toLocaleString()}/${t.toLocaleString()}` : "";
   };
-  for (const limit of (data?.limits ?? []).slice(0, 6)) {
+  for (const limit of (Array.isArray(data?.limits) ? data.limits : []).slice(0, 6)) {
     const type = String(limit?.type ?? "");
     // A missing percentage falls back to the used/total counts when both are reported.
     const reported = reading(limit?.percentage);
