@@ -241,14 +241,44 @@ export async function getJson(url, token, headers = {}, timeoutMs = TIMEOUT_MS) 
   }
 }
 
-// Thrown when pi cannot resolve a provider's credential — typically an OAuth refresh that failed
-// because the refresh token itself has expired. Only a fixed hint is ever rendered, never the reason.
+// pi wraps every refresh failure as "OAuth refresh failed for <provider>: <cause>" and keeps the
+// cause, so the word "refresh" alone cannot tell an expired login from a network drop. Classify from
+// the HTTP status and network codes in the message and cause chain; only a real expiry is "expired".
+const LOGIN_STATUS = [/status[=:\s]+(\d{3})\b/i, /\bHTTP (\d{3})\b/i, /failed \((\d{3})\)/i, /(?:^|: )(\d{3}) [A-Z][a-z]/];
+const LOGIN_NETWORK_CODE = /\b(ECONN[A-Z]+|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|UND_ERR_[A-Z_]+)\b/;
+const LOGIN_NETWORK = /fetch failed|socket hang up/i;
+const LOGIN_TIMEOUT = /TimeoutError|timed? ?out|aborted due to timeout|refresh aborted/i;
+const LOGIN_EXPIRED = /expired|invalid_grant|revoked|re-?authenticate|unauthori[sz]ed/i;
+
+function loginFailure(reason) {
+  const texts = [];
+  for (let error = reason, depth = 0; error != null && depth < 5; error = error.cause, depth++) {
+    texts.push(String(error?.message ?? error), String(error?.name ?? ""), typeof error?.code === "string" ? error.code : "");
+  }
+  const text = texts.join("\n");
+  const status = LOGIN_STATUS.map((pattern) => Number(text.match(pattern)?.[1])).find(Number.isFinite);
+  const networkCode = text.match(LOGIN_NETWORK_CODE)?.[1];
+  const kind = status === 429 ? "rate-limited"
+    : status >= 500 ? "provider"
+    : LOGIN_TIMEOUT.test(text) ? "timeout"
+    : networkCode || LOGIN_NETWORK.test(text) ? "network"
+    : status === 400 || status === 401 || LOGIN_EXPIRED.test(text) ? "expired"
+    : "unknown";
+  return { kind, status, networkCode };
+}
+
+// Thrown when pi cannot resolve a provider's credential, for example when an OAuth refresh fails.
+// Only a fixed hint or plain-words detail is ever rendered, never the reason.
 export class LoginFailed extends Error {
   constructor(provider, reason) {
     super("login failed");
     this.name = "LoginFailed";
     this.provider = provider;
-    this.expired = /expired|invalid_grant|revoked|re-?authenticate|refresh/i.test(String(reason?.message ?? reason ?? ""));
+    const { kind, status, networkCode } = loginFailure(reason);
+    this.kind = kind;
+    this.expired = kind === "expired";
+    this.httpStatus = status;
+    this.networkCode = networkCode;
   }
 }
 
@@ -839,6 +869,14 @@ function describeError(error) {
 // Block shapes: { name, lines } when the provider is connected and reported at least one meter;
 // otherwise { name, status, hint | detail } with status unconnected | rejected | nodata | error.
 // Status blocks never render as blocks — renderContent folds them into one dim footer line.
+// Plain words for a login lookup that failed for a reason other than an expired login.
+const LOGIN_FAILURE_DETAIL = {
+  network: "network error",
+  provider: "provider error — try again later",
+  "rate-limited": "rate limited — try again shortly",
+  timeout: "timed out",
+};
+
 // Settles with the promise, or rejects with the standard "timed out" error once ms pass.
 function withDeadline(promise, ms) {
   let timer;
@@ -861,9 +899,11 @@ async function fetchAll(ctx, deps) {
       if (error instanceof NotConnected) return { name, status: "unconnected", hint: error.hint };
       const expiredHint = login ? `login expired (/login ${login})` : "API key rejected";
       if (error instanceof LoginFailed) {
-        return error.expired
-          ? { name, status: "rejected", hint: expiredHint, debug: "credential refresh failed" }
-          : { name, status: "error", detail: "login check failed", debug: "credential resolution failed" };
+        if (error.expired) return { name, status: "rejected", hint: expiredHint, debug: "credential refresh failed" };
+        const detail = LOGIN_FAILURE_DETAIL[error.kind];
+        if (!detail) return { name, status: "error", detail: "login check failed", debug: "credential resolution failed" };
+        const cause = error.httpStatus ? ` HTTP ${error.httpStatus}` : error.networkCode ? ` ${error.networkCode}` : "";
+        return { name, status: "error", detail, debug: `credential refresh failed${cause}` };
       }
       if (error?.message === "HTTP 401") {
         return { name, status: "rejected", hint: expiredHint, debug: typeof error.debug === "string" ? error.debug : "HTTP 401" };

@@ -1486,3 +1486,47 @@ test("a credential lookup that never settles times out without holding the other
   assert.equal(data.blocks.find((entry) => entry.name === "Codex").status, "unconnected");
   assert.match(renderContent(data), /Claude: timed out/);
 });
+
+// pi wraps every refresh failure as "OAuth refresh failed for <provider>: <cause>" and keeps the cause.
+const refreshFailure = (provider, detail, cause) => new Error(`OAuth refresh failed for ${provider}: ${detail}`, cause && { cause });
+
+test("a refresh failure from the network, a 5xx or a 429 is not a login expiry", async () => {
+  const networkCause = Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+  const timeoutCause = Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+  const failures = {
+    anthropic: refreshFailure("anthropic", "Anthropic token refresh request failed. url=https://example.test/token; details=fetch failed", networkCause),
+    "openai-codex": refreshFailure("openai-codex", "OpenAI Codex token refresh error: OpenAI Codex token refresh failed (429): Too Many Requests"),
+    "kimi-coding": refreshFailure("kimi-coding", "Kimi Code token refresh failed with status 500: upstream text"),
+    xai: refreshFailure("xai", "The operation was aborted due to timeout", timeoutCause),
+    "github-copilot": refreshFailure("github-copilot", "503 Service Unavailable: upstream text"),
+  };
+  const ctx = { modelRegistry: { getProviderAuth: async (provider) => { if (failures[provider]) throw failures[provider]; } } };
+  const data = await createUsageLoader()(ctx, true);
+  const detail = (name) => data.blocks.find((block) => block.name === name);
+  assert.deepEqual(
+    ["Claude", "Codex", "Kimi", "Grok", "Copilot"].map((name) => [name, detail(name).status, detail(name).detail]),
+    [
+      ["Claude", "error", "network error"],
+      ["Codex", "error", "rate limited — try again shortly"],
+      ["Kimi", "error", "provider error — try again later"],
+      ["Grok", "error", "timed out"],
+      ["Copilot", "error", "provider error — try again later"],
+    ],
+  );
+  assert.equal(detail("Claude").debug, "credential refresh failed ECONNREFUSED");
+  assert.equal(detail("Codex").debug, "credential refresh failed HTTP 429");
+  assert.doesNotMatch(JSON.stringify(data), /upstream text|example\.test|Too Many Requests/);
+  assert.doesNotMatch(renderContent(data), /login expired/);
+
+  const anthropic5xx = refreshFailure("anthropic", "Anthropic token refresh request failed. url=https://example.test/token; details=HTTP request failed. status=502; url=https://example.test/token; body=");
+  const expired = {
+    anthropic: anthropic5xx,
+    xai: refreshFailure("xai", "xAI OAuth token refresh failed (HTTP 400): invalid_grant: refresh token expired"),
+    "kimi-coding": refreshFailure("kimi-coding", "Kimi Code token refresh unauthorized (status 401)"),
+  };
+  const again = await createUsageLoader()({ modelRegistry: { getProviderAuth: async (provider) => { if (expired[provider]) throw expired[provider]; } } }, true);
+  const block = (name) => again.blocks.find((entry) => entry.name === name);
+  assert.equal(block("Claude").detail, "provider error — try again later");
+  assert.equal(block("Grok").hint, "login expired (/login xai)");
+  assert.equal(block("Kimi").hint, "login expired (/login kimi-coding)");
+});
