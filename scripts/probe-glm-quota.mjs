@@ -1,32 +1,8 @@
 // Dev probe: dump the raw GLM/Z.ai quota payload shape (key never printed).
 // Usage: node scripts/probe-glm-quota.mjs
-// Reads ZAI_API_KEY or ZAI_CODING_CN_API_KEY from the environment or
-// <home>/git_projects/coop-light/.env, calls the matching undocumented
-// monitor endpoint, and prints sanitized JSON.
+// Reads ZAI_API_KEY or ZAI_CODING_CN_API_KEY from the environment only,
+// calls the matching undocumented monitor endpoint, and prints sanitized JSON.
 // Not shipped: excluded via package.json "files".
-
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
-const ENV_FILE = join(homedir(), "git_projects", "coop-light", ".env");
-
-function readDotenvValue(text, variable) {
-  const matches = [];
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#") || !line.includes("=")) continue;
-    const [name, ...rest] = line.split("=");
-    if (name.trim() !== variable) continue;
-    let value = rest.join("=").trim();
-    if (value.length >= 2 && value[0] === value.at(-1) && ["'", '"'].includes(value[0])) {
-      value = value.slice(1, -1);
-    }
-    if (value) matches.push(value);
-  }
-  if (matches.length > 1) throw new Error(`expected at most one ${variable} entry in ${ENV_FILE}`);
-  return matches[0];
-}
 
 function sanitize(value, depth = 0) {
   if (depth > 8) return "…";
@@ -43,7 +19,6 @@ function sanitize(value, depth = 0) {
   return String(value);
 }
 
-const dotenv = await readFile(ENV_FILE, "utf8").catch(() => "");
 const providers = [
   {
     variable: "ZAI_API_KEY",
@@ -58,7 +33,7 @@ const providers = [
 ];
 let selected;
 for (const provider of providers) {
-  const key = process.env[provider.variable]?.trim() || readDotenvValue(dotenv, provider.variable);
+  const key = process.env[provider.variable]?.trim();
   if (key) {
     selected = { ...provider, key };
     break;
