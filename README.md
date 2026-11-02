@@ -2,7 +2,7 @@
 
 A [pi](https://pi.dev) coding agent extension that adds a `/usage` command showing **subscription quota for every provider you're connected to** — one compact, colour-coded block instead of a dashboard per provider. Claude, Codex, Kimi, Grok, and GitHub Copilot authenticate via pi's OAuth; the GLM and MiniMax plans use the API keys pi already holds (`ZAI_API_KEY` / `ZAI_CODING_CN_API_KEY`, `MINIMAX_API_KEY` / `MINIMAX_CN_API_KEY`). Pay-as-you-go accounts without a plan (DeepSeek, MiniMax `sk-api-` keys) are out of scope by design: this meters plans. A credit balance that belongs to a metered plan, such as Codex credits, shows in that plan's block.
 
-![Colour-coded usage meters for Claude, Codex, Kimi, Grok, Copilot, and GLM (synthetic fixture data)](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/main/assets/pi-usage.png)
+![Colour-coded usage meters for Claude, Codex, and Grok, from a live /usage](https://raw.githubusercontent.com/Quigleybits/pi-usage-meters/main/assets/pi-usage.png)
 
 Each provider block is colour-coded on your terminal's existing background, bars fill left-to-right with usage, and the pie glyph (`○ ◔ ◑ ◕ ●`) fills as the quota window elapses toward reset. The entry renders in the transcript but never enters LLM context.
 
