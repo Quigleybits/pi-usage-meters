@@ -1354,3 +1354,87 @@ test("the loader has no Grok Bot block and never asks for a Cursor login", async
     }
   });
 });
+
+// ---- Missing readings are never numbers ----
+
+const UNAVAILABLE = /window reported, reading unavailable$/;
+
+test("missing percentages render as unavailable, never as 0% or 100%", async () => {
+  for (const missing of [null, "", "  ", true, "n/a", {}]) {
+    await withFetch(claudeFetch({
+      seven_day: { utilization: missing, resets_at: inHours(72) },
+      limits: [{ group: "weekly", scope: { model: { display_name: "Fable" } }, percent: missing, resets_at: inHours(72) }],
+    }), async () => {
+      const lines = await fetchAnthropic(authContext({ anthropic: oauth() }));
+      assert.match(lines.find((row) => row.includes("Week (all models)")), UNAVAILABLE);
+      assert.match(lines.find((row) => row.includes("Week (Fable)")), UNAVAILABLE);
+    });
+    await withFetch(async (url) => json(String(url).endsWith("rate-limit-reset-credits") ? { credits: [] } : {
+      rate_limit: { secondary_window: { limit_window_seconds: 604800, used_percent: missing, reset_at: 1786500000 } },
+    }), async () => {
+      const lines = await fetchCodex(authContext({ "openai-codex": oauth(jwt()) }));
+      assert.match(lines.find((row) => row.trimStart().startsWith("Week ")), UNAVAILABLE);
+    });
+    await withFetch(async () => json({ usage: { used: missing, limit: 300, resetTime: "2030-08-15T12:00:00Z" } }), async () => {
+      const lines = await fetchKimi(authContext({ "kimi-coding": oauth() }));
+      assert.match(lines.find((row) => row.trimStart().startsWith("Week ")), UNAVAILABLE);
+    });
+    await withFetch(async () => json({ data: { limits: [{ type: "TOKENS_LIMIT", percentage: missing, unit: 3, number: 5 }] } }), async () => {
+      const lines = await fetchGlm(authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } }));
+      assert.match(lines.find((row) => row.includes("Session (5h)")), UNAVAILABLE);
+    });
+  }
+});
+
+test("Grok without a weekly percent keeps the monthly fallback or reports the week as unavailable", () => withState(async () => {
+  const monthly = await runGrokFetch({ config: {
+    isUnifiedBillingUser: true,
+    creditUsagePercent: null,
+    monthlyLimit: { val: 100 },
+    used: { val: 25 },
+    billingPeriodStart: "2030-08-01T00:00:00Z",
+    billingPeriodEnd: "2030-09-01T00:00:00Z",
+  } });
+  assert.match(monthly.join("\n"), /Month \(credits\).*25%/);
+  assert.doesNotMatch(monthly.join("\n"), /Week \(credits\)/);
+
+  const weekly = await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], null, {
+    productUsage: [{ product: "GrokBot", usagePercent: null }, { product: "Api", usagePercent: "" }],
+  }));
+  assert.match(weekly.find((row) => row.includes("Week (credits)")), UNAVAILABLE);
+  assert.ok(!weekly.some((row) => /^\s*(Bot|Grok API) /.test(row)));
+}));
+
+test("missing percentages fall back to valid counts", async () => {
+  await withFetch(async () => json(minimaxFixture({
+    current_interval_total_count: 100,
+    current_interval_usage_count: 80,
+    current_interval_remaining_percent: null,
+  })), async () => {
+    const lines = await fetchMinimax(authContext({ minimax: { source: "apiKey", auth: { apiKey: "mm-key" } } }));
+    assert.match(lines.find((row) => row.includes("Session (5h)")), /\s20% reset .* · 20\/100$/);
+  });
+  const user = {
+    ...copilotUser,
+    quota_snapshots: { ...copilotUser.quota_snapshots, premium_interactions: { entitlement: 300, remaining: 240, percent_remaining: null } },
+  };
+  await withFetch(async () => json(user), async () => {
+    const lines = await fetchCopilot(copilotCtx, { readCredential: async () => copilotCredential() });
+    assert.match(lines.find((row) => row.includes("Premium requests")), /\s20% reset .* · 60\/300$/);
+  });
+  const free = {
+    access_type_sku: "free_limited_copilot",
+    monthly_quotas: { chat: 50, completions: 2000 },
+    limited_user_quotas: { chat: null, completions: 1500 },
+    limited_user_reset_date: "2030-09-01",
+  };
+  await withFetch(async () => json(free), async () => {
+    const lines = await fetchCopilot(copilotCtx, { readCredential: async () => copilotCredential() });
+    assert.match(lines.find((row) => row.trimStart().startsWith("Chat ")), UNAVAILABLE);
+    assert.match(lines.find((row) => row.trimStart().startsWith("Completions ")), /\s25% reset .* · 500\/2,000$/);
+  });
+  await withFetch(async () => json({ data: { limits: [{ type: "TIME_LIMIT", percentage: null, currentValue: 30, usage: 100 }] } }), async () => {
+    const lines = await fetchGlm(authContext({ zai: { source: "apiKey", auth: { apiKey: "zai-key" } } }));
+    assert.match(lines.find((row) => row.includes("MCP (month)")), /\s30% · 30\/100$/);
+  });
+});

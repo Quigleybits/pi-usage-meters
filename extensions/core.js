@@ -71,10 +71,19 @@ export function bar(value, width = 10) {
   return "█".repeat(n) + "░".repeat(width - n);
 }
 
+// A reading is a number or a numeric string. null, blank, boolean and anything else is missing (NaN):
+// Number(null), Number("") and Number(true) would otherwise look like real 0% or 1% readings.
+function reading(value) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.trim() !== "") return Number(value);
+  return NaN;
+}
+
+// Used share of a limit, or NaN when either count is missing.
 export function pct(used, limit) {
-  const u = Number(used);
-  const l = Number(limit);
-  return Number.isFinite(u) && Number.isFinite(l) && l > 0 ? clampPct((u / l) * 100) : 0;
+  const u = reading(used);
+  const l = reading(limit);
+  return Number.isFinite(u) && Number.isFinite(l) && l > 0 ? clampPct((u / l) * 100) : NaN;
 }
 
 export function fmtReset(ms) {
@@ -117,6 +126,13 @@ export function line(label, value, resetMs, windowMs) {
 
 export function plain(label, text) {
   return `  ${field(label)} ${clean(text, MAX_RENDER_LINE - LABEL_W - 3)}`;
+}
+
+// A reported window without a usable percentage says so instead of drawing a 0% bar.
+function meter(label, value, resetMs, windowMs) {
+  return Number.isFinite(value)
+    ? line(label, value, resetMs, windowMs)
+    : plain(label, "window reported, reading unavailable");
 }
 
 const windowLabel = (ms) => {
@@ -314,14 +330,11 @@ export async function fetchAnthropic(ctx) {
   ]);
   const plan = claudePlanLabel(profile);
   const lines = [header("Claude", plan)];
-  const isPct = (value) => typeof value === "number" && Number.isFinite(value);
   // The plan label alone proves neither Ultra verification nor 5h enforcement, so every plan shows
   // only what the API returned: a reported window renders (Ultra flags it as an API meter), and a
   // null or missing five_hour field adds no Session row. Absence implies nothing either way.
   if (usage.five_hour) {
-    lines.push(isPct(usage.five_hour.utilization)
-      ? line("Session (5h)", usage.five_hour.utilization, Date.parse(usage.five_hour.resets_at), H5)
-      : plain("Session (5h)", "window reported, reading unavailable"));
+    lines.push(meter("Session (5h)", reading(usage.five_hour.utilization), Date.parse(usage.five_hour.resets_at), H5));
     if (plan === "Ultra") lines.push(plain("", "API meter; may not be an enforced limit"));
   }
   // A limits entry {kind: "session", is_active} is telemetry, not proof of enforcement: show the
@@ -338,11 +351,11 @@ export async function fetchAnthropic(ctx) {
     }
   }
   if (usage.seven_day) {
-    lines.push(line("Week (all models)", usage.seven_day.utilization, Date.parse(usage.seven_day.resets_at), D7));
+    lines.push(meter("Week (all models)", reading(usage.seven_day.utilization), Date.parse(usage.seven_day.resets_at), D7));
   }
   for (const limit of (Array.isArray(usage.limits) ? usage.limits : []).slice(0, 10)) {
     if (limit.group === "weekly" && limit.scope?.model?.display_name) {
-      lines.push(line(`Week (${limit.scope.model.display_name})`, limit.percent, Date.parse(limit.resets_at), D7));
+      lines.push(meter(`Week (${limit.scope.model.display_name})`, reading(limit.percent), Date.parse(limit.resets_at), D7));
     }
   }
   if (usage.extra_usage?.credits_ever_enabled) {
@@ -390,7 +403,7 @@ export async function fetchCodex(ctx, { clock = Date.now } = {}) {
   for (const window of [usage.rate_limit?.primary_window, usage.rate_limit?.secondary_window]) {
     if (!window) continue;
     const seconds = Number(window.limit_window_seconds) || 0;
-    lines.push(line(windowLabel(seconds * 1000), window.used_percent, Number(window.reset_at) * 1000, seconds * 1000));
+    lines.push(meter(windowLabel(seconds * 1000), reading(window.used_percent), Number(window.reset_at) * 1000, seconds * 1000));
   }
   const creditText = codexCreditText(usage.credits);
   if (creditText) lines.push(plain("Credits", creditText));
@@ -423,10 +436,10 @@ export async function fetchKimi(ctx) {
   const five = (Array.isArray(usage.limits) ? usage.limits : []).slice(0, 10).find((limit) => limit?.window?.timeUnit === "TIME_UNIT_MINUTE");
   if (five?.detail) {
     const windowMs = (Number(five.window?.duration) || 300) * 60e3;
-    lines.push(line(windowLabel(windowMs), pct(five.detail.used, five.detail.limit), Date.parse(five.detail.resetTime), windowMs));
+    lines.push(meter(windowLabel(windowMs), pct(five.detail.used, five.detail.limit), Date.parse(five.detail.resetTime), windowMs));
   }
   if (usage.usage?.limit) {
-    lines.push(line("Week", pct(usage.usage.used, usage.usage.limit), Date.parse(usage.usage.resetTime), D7));
+    lines.push(meter("Week", pct(usage.usage.used, usage.usage.limit), Date.parse(usage.usage.resetTime), D7));
   }
   return lines;
 }
@@ -454,16 +467,18 @@ export async function fetchXai(ctx) {
   const start = Date.parse(config.currentPeriod?.start ?? config.billingPeriodStart);
   const end = Date.parse(config.currentPeriod?.end ?? config.billingPeriodEnd);
   const periodMs = Number.isFinite(start) && Number.isFinite(end) && end > start ? end - start : D7;
-  const creditPct = Number(config.creditUsagePercent);
-  const weekly =
-    config.currentPeriod?.type === "USAGE_PERIOD_TYPE_WEEKLY"
-    || config.isUnifiedBillingUser === true
-    || Number.isFinite(creditPct);
+  const creditPct = reading(config.creditUsagePercent);
+  const monthlyLimit = reading(config.monthlyLimit?.val);
+  // A weekly payload without its percent falls back to a reported monthly limit.
+  const weekly = Number.isFinite(creditPct) || (
+    (config.currentPeriod?.type === "USAGE_PERIOD_TYPE_WEEKLY" || config.isUnifiedBillingUser === true)
+    && !(monthlyLimit > 0)
+  );
 
   if (weekly) {
-    lines.push(line("Week (credits)", Number.isFinite(creditPct) ? creditPct : 0, end, periodMs));
+    lines.push(meter("Week (credits)", creditPct, end, periodMs));
     const products = (config.productUsage ?? []).slice(0, 8).flatMap((product) => {
-      const productPct = Number(product?.usagePercent);
+      const productPct = reading(product?.usagePercent);
       return Number.isFinite(productPct) ? [{ name: grokProductLabel(product.product), pct: productPct }] : [];
     });
     const productSum = products.reduce((sum, product) => sum + product.pct, 0);
@@ -496,10 +511,9 @@ export async function fetchXai(ctx) {
       await writeUsageState(state);
     }
   } else {
-    const limit = Number(config.monthlyLimit?.val);
-    const used = Number(config.used?.val);
-    if (Number.isFinite(limit) && limit > 0) {
-      lines.push(line("Month (credits)", pct(used, limit), end, periodMs));
+    const used = reading(config.used?.val);
+    if (monthlyLimit > 0) {
+      lines.push(meter("Month (credits)", pct(used, monthlyLimit), end, periodMs));
     } else if (Number.isFinite(used)) {
       lines.push(plain("Month (credits)", `${used.toLocaleString()} used (no limit reported)`));
     }
@@ -556,13 +570,15 @@ export async function fetchGlm(ctx) {
   const level = clean(String(data?.level ?? "").toLowerCase(), 24);
   const lines = [header("GLM", level ? `${level} plan` : undefined)];
   const counts = (current, total) => {
-    const c = Number(current);
-    const t = Number(total);
+    const c = reading(current);
+    const t = reading(total);
     return Number.isFinite(c) && Number.isFinite(t) && t > 0 ? ` · ${c.toLocaleString()}/${t.toLocaleString()}` : "";
   };
   for (const limit of (data?.limits ?? []).slice(0, 6)) {
     const type = String(limit?.type ?? "");
-    const percent = clampPct(Number(limit?.percentage));
+    // A missing percentage falls back to the used/total counts when both are reported.
+    const reported = reading(limit?.percentage);
+    const percent = Number.isFinite(reported) ? clampPct(reported) : pct(limit?.currentValue, limit?.usage);
     // API may send epoch-ms or an ISO string; Number() on an ISO string is NaN.
     const rawReset = limit?.nextResetTime;
     const resetMs = typeof rawReset === "number" ? rawReset : Date.parse(String(rawReset ?? ""));
@@ -580,15 +596,15 @@ export async function fetchGlm(ctx) {
       const label = Number.isFinite(windowMs)
         ? (isSession ? windowLabel(windowMs) : `${period} (tokens)`)
         : "Session (tokens)";
-      lines.push(line(label, percent, resetMs, windowMs));
+      lines.push(meter(label, percent, resetMs, windowMs));
     } else if (type === "TIME_LIMIT") {
-      lines.push(line("MCP (month)", percent, Number.isFinite(resetMs) ? resetMs : NaN)
+      lines.push(meter("MCP (month)", percent, Number.isFinite(resetMs) ? resetMs : NaN)
         + counts(limit.currentValue, limit.usage));
     } else if (type === "CREDIT_LIMIT") {
       // Window shape: unit/number encode the rolling window (verified: {unit:3,number:5}=5h
       // session with NO nextResetTime field; {unit:6,number:1}=monthly with epoch-ms reset).
       // Session when the window itself is short (≤24h); fall back to the reset horizon.
-      lines.push(line(isSession ? (Number.isFinite(windowMs) ? windowLabel(windowMs) : "Session (credits)") : `${period} (credits)`, percent, resetMs, windowMs)
+      lines.push(meter(isSession ? (Number.isFinite(windowMs) ? windowLabel(windowMs) : "Session (credits)") : `${period} (credits)`, percent, resetMs, windowMs)
         + counts(limit.currentValue, limit.usage));
     }
   }
@@ -607,10 +623,10 @@ const MINIMAX_PROVIDERS = [
 // remaining_percent is authoritative when present (the official CLI renders it even for zero-total,
 // time-based plans); counts are shown only when a positive total makes them meaningful.
 function minimaxWindow(reported, total, remainingPercent, boostPermille, status) {
-  const t = Number(total);
+  const t = reading(total);
   const hasTotal = Number.isFinite(t) && t > 0;
-  const r = Number(reported);
-  const percent = Number(remainingPercent);
+  const r = reading(reported);
+  const percent = reading(remainingPercent);
   const boost = Number(boostPermille) > 0 ? Number(boostPermille) / 1000 : 1;
   let remaining = hasTotal && Number.isFinite(r) && r >= 0 && r <= t ? r : NaN; // legacy reading: a remaining count
   if (Number.isFinite(percent) && Number.isFinite(remaining)) {
@@ -733,18 +749,17 @@ export async function fetchCopilot(ctx, { readCredential = readPiCredential } = 
   for (const [key, label] of [["premium_interactions", "Premium requests"], ["chat", "Chat"], ["completions", "Completions"]]) {
     const snap = snapshots?.[key];
     if (!snap || typeof snap !== "object" || snap.unlimited === true) continue;
-    const entitlement = Number(snap.entitlement);
-    const remaining = Number(snap.remaining ?? snap.quota_remaining);
-    const percentRemaining = Number(snap.percent_remaining);
+    const entitlement = reading(snap.entitlement);
+    const remaining = reading(snap.remaining ?? snap.quota_remaining);
+    const percentRemaining = reading(snap.percent_remaining);
     const usedPct = Number.isFinite(percentRemaining)
       ? clampPct(100 - percentRemaining)
       : entitlement > 0 && Number.isFinite(remaining) ? pct(entitlement - remaining, entitlement) : NaN;
-    if (!Number.isFinite(usedPct)) continue;
     const counts = entitlement > 0 && Number.isFinite(remaining)
       ? ` · ${Math.max(0, entitlement - remaining).toLocaleString()}/${entitlement.toLocaleString()}`
       : "";
     const overage = Math.trunc(Number(snap.overage_count));
-    lines.push(line(label, usedPct, resetMs, D30) + counts + (overage > 0 ? ` (+${overage.toLocaleString()} overage)` : ""));
+    lines.push(meter(label, usedPct, resetMs, D30) + counts + (overage > 0 ? ` (+${overage.toLocaleString()} overage)` : ""));
   }
   // Copilot Free reports monthly allowances and what is left of them instead of quota snapshots.
   const monthly = user?.monthly_quotas;
@@ -752,9 +767,13 @@ export async function fetchCopilot(ctx, { readCredential = readPiCredential } = 
   if (!snapshots && monthly && typeof monthly === "object" && left && typeof left === "object") {
     const freeReset = parseTs(user?.limited_user_reset_date);
     for (const [key, label] of [["chat", "Chat"], ["completions", "Completions"]]) {
-      const limit = Number(monthly[key]);
-      const remaining = Number(left[key]);
-      if (!(limit > 0) || !Number.isFinite(remaining)) continue;
+      const limit = reading(monthly[key]);
+      const remaining = reading(left[key]);
+      if (!(limit > 0)) continue;
+      if (!Number.isFinite(remaining)) {
+        lines.push(meter(label, NaN));
+        continue;
+      }
       const used = Math.max(0, limit - remaining);
       lines.push(line(label, pct(used, limit), freeReset, D30) + ` · ${used.toLocaleString()}/${limit.toLocaleString()}`);
     }

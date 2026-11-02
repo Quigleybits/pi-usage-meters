@@ -17,7 +17,7 @@ const NOW = Date.parse("2026-11-02T10:00:00Z");
 const iso = (hours) => new Date(NOW + hours * 3600000).toISOString();
 const secret = "synthetic-credential-must-never-appear";
 
-async function collect({ auth, usage = {}, status = {} } = {}) {
+async function collect({ auth, usage = {}, codex = {}, grok = {}, status = {} } = {}) {
   const originalFetch = globalThis.fetch;
   const originalNow = Date.now;
   Date.now = () => NOW;
@@ -29,11 +29,12 @@ async function collect({ auth, usage = {}, status = {} } = {}) {
       "/backend-api/wham/usage": {
         rate_limit: { secondary_window: { limit_window_seconds: 604800, used_percent: 79, reset_at: (NOW / 1000) + 230400 } },
         rate_limit_reset_credits: { available_count: 2 },
+        ...codex,
       },
       "/backend-api/wham/rate-limit-reset-credits": {
         credits: [{ expires_at: "2026-11-06T10:00:00Z" }, { expires_at: "2026-11-30T10:00:00Z" }],
       },
-      "/v1/billing": { config: { creditUsagePercent: 16, currentPeriod: { start: iso(-111), end: iso(57), type: "USAGE_PERIOD_TYPE_WEEKLY" } } },
+      "/v1/billing": { config: { creditUsagePercent: 16, currentPeriod: { start: iso(-111), end: iso(57), type: "USAGE_PERIOD_TYPE_WEEKLY" }, ...grok } },
       "/v1/settings": {},
     };
     assert.ok(Object.hasOwn(bodies, path), `unexpected request: ${path}`);
@@ -98,4 +99,17 @@ for (const [offset, reset] of [[5000, "<1m"], [0, "soon"]]) {
 test("banked resets remain visible when the optional expiry lookup fails", async () => {
   const data = await collect({ status: { "/backend-api/wham/rate-limit-reset-credits": 503 } });
   assert.equal(data.providers[1].banked, "2 banked resets");
+});
+
+test("a missing weekly percentage is an error, never a full or empty meter", async () => {
+  const data = await collect({
+    usage: { seven_day: { utilization: null, resets_at: iso(122) } },
+    codex: { rate_limit: { secondary_window: { limit_window_seconds: 604800, used_percent: null, reset_at: (NOW / 1000) + 230400 } } },
+    grok: { creditUsagePercent: null },
+  });
+  assert.deepEqual(data.providers, [
+    { name: "Claude", error: "weekly usage not shown" },
+    { name: "Codex", error: "weekly usage not shown" },
+    { name: "Grok", error: "weekly usage not shown" },
+  ]);
 });
