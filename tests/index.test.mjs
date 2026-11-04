@@ -1,7 +1,7 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -69,6 +69,23 @@ function jwt(accountId = "account-123") {
 
 test("clean strips terminal and bidi controls and truncates", () => {
   assert.equal(clean(" safe\x1b[31m\u202eBAD ", 7), "safe[31");
+});
+
+for (const code of [0x061c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x2028, 0x2029, 0xfeff]) {
+  const label = `U+${code.toString(16).toUpperCase().padStart(4, "0")}`;
+  const text = `safe${String.fromCodePoint(code)}text`;
+  test(`clean removes invisible or layout character ${label}`, () => {
+    assert.equal(clean(text), "safetext");
+  });
+  test(`renderer removes invisible or layout character ${label} from headers and indented rows`, () => {
+    assert.deepEqual(renderedRows({ blocks: [{ name: "Codex", lines: [text, `  ${text}`] }] }), ["safetext", "  safetext"]);
+  });
+}
+
+test("sanitizing preserves normal text, percentages, meter glyphs, and accented letters", () => {
+  const text = "Normal text 50% ○◔◑◕● █░ café naïve Ångström";
+  assert.equal(clean(text), text);
+  assert.deepEqual(renderedRows({ blocks: [{ name: "Codex", lines: [text, `  ${text}`] }] }), [text, `  ${text}`]);
 });
 
 test("bars, percentages, and pies stay within bounds", () => {
@@ -1114,6 +1131,15 @@ test("Copilot reads the GitHub token through the injected credential reader and 
   });
 });
 
+for (const plan of ["constructor", "__proto__", "toString"]) {
+  test(`Copilot treats inherited plan key ${plan} as an unknown plan label`, async () => {
+    await withFetch(async () => json({ ...copilotUser, copilot_plan: plan }), async () => {
+      const lines = await fetchCopilot(copilotCtx, { readCredential: async () => copilotCredential() });
+      assert.equal(lines[0], `Copilot (${plan})`);
+    });
+  });
+}
+
 test("Copilot Free tier, lapsed subscriptions, and the loader's status mapping", async () => {
   const readCredential = async () => copilotCredential();
   await withFetch(async () => json({
@@ -1217,6 +1243,22 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   assert.equal(await load(ctx), a);
   assert.equal(resolutions, 9);
 });
+
+for (const [label, age, fresh] of [
+  ["fresh after 30 seconds", 30_000, true],
+  ["stale after 61 seconds", 61_000, false],
+  ["stale when the clock moves back one hour", -3_600_000, false],
+]) {
+  test(`loader cache is ${label}`, async (t) => {
+    let now = 1_800_000_000_000;
+    t.mock.method(Date, "now", () => now);
+    const load = createUsageLoader();
+    const ctx = authContext();
+    const first = await load(ctx);
+    now += age;
+    assert.equal((await load(ctx)) === first, fresh);
+  });
+}
 
 test("package manifest limits files and includes community metadata", () => {
   assert.deepEqual(pkg.files, ["extensions", "README.md", "LICENSE"]);
@@ -1438,6 +1480,16 @@ test("missing percentages fall back to valid counts", async () => {
     assert.match(lines.find((row) => row.includes("MCP (month)")), /\s30% · 30\/100$/);
   });
 });
+
+test("state writes restrict the saved file to owner read and write", { skip: process.platform === "win32" }, () => withState(async (statePath) => {
+  const previousUmask = process.umask(0o022);
+  try {
+    await runGrokFetch(grokBilling(PERIOD_A[0], PERIOD_A[1], 12), statePath);
+    assert.equal(statSync(statePath).mode & 0o777, 0o600);
+  } finally {
+    process.umask(previousUmask);
+  }
+}));
 
 test("state writes use their own temp file, so a stray or shared .tmp cannot block or mix them", () => withState(async (statePath) => {
   mkdirSync(`${statePath}.tmp`); // the old fixed temp name, taken by another writer

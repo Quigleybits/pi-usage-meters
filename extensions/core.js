@@ -34,7 +34,7 @@ async function writeUsageState(state) {
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(tmp, JSON.stringify(state));
+    await writeFile(tmp, JSON.stringify(state), { mode: 0o600 });
     await rename(tmp, path);
   } catch {
     // State persistence is best-effort; /usage must never fail because of it.
@@ -62,7 +62,7 @@ export const COLORS = {
 
 export function clean(value, max = 200) {
   return String(value ?? "")
-    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g, "")
     .trim()
     .slice(0, max);
 }
@@ -791,7 +791,7 @@ function copilotApiHost(enterpriseUrl) {
 function copilotPlanLabel(user) {
   if (user?.access_type_sku === "free_limited_copilot") return "Free";
   const plan = String(user?.copilot_plan ?? "");
-  return COPILOT_PLANS[plan] ?? (clean(plan, 24) || undefined);
+  return Object.hasOwn(COPILOT_PLANS, plan) ? COPILOT_PLANS[plan] : (clean(plan, 24) || undefined);
 }
 
 export async function fetchCopilot(ctx, { readCredential = readPiCredential } = {}) {
@@ -929,7 +929,8 @@ export function createUsageLoader(deps = {}) {
   let cache;
   let inFlight;
   return async (ctx, refresh = false) => {
-    if (!refresh && cache && Date.now() - cache.at < CACHE_MS) return cache.data;
+    const age = cache ? Date.now() - cache.at : NaN;
+    if (!refresh && age >= 0 && age < CACHE_MS) return cache.data;
     if (inFlight) return inFlight;
     inFlight = (async () => {
       const data = { blocks: await fetchAll(ctx, deps), fetchedAt: new Date().toISOString() };
