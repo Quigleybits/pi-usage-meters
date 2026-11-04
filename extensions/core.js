@@ -326,6 +326,37 @@ export async function apiKeyFor(ctx, provider) {
   return key.trim() || undefined;
 }
 
+function hasVendorHost(baseUrl, host) {
+  if (typeof baseUrl !== "string") return false;
+  try {
+    const url = new URL(baseUrl);
+    return url.protocol === "https:" && url.hostname === host && !url.port && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+async function vendorApiKeyFor(ctx, providerId, endpoint) {
+  try {
+    const host = new URL(endpoint).hostname;
+    const provider = ctx.modelRegistry.getProvider(providerId);
+    if (!hasVendorHost(provider?.baseUrl, host)) return undefined;
+    const models = provider.getAllModels === undefined ? provider.getModels() : provider.getAllModels();
+    if (!Array.isArray(models) || !models.length) return undefined;
+    for (const model of models) {
+      if (!hasVendorHost(model?.baseUrl, host)) return undefined;
+    }
+    const result = await providerAuth(ctx, providerId);
+    const auth = result?.auth;
+    if (!auth || ("baseUrl" in auth && !hasVendorHost(auth.baseUrl, host))) return undefined;
+    const key = typeof auth.apiKey === "string" ? auth.apiKey : "";
+    return key.trim() || undefined;
+  } catch {
+    // Unknown providers and unsupported catalogs cannot establish the key's destination.
+    return undefined;
+  }
+}
+
 export function codexAccountId(token) {
   try {
     const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
@@ -622,8 +653,7 @@ const GLM_PROVIDERS = [
 
 async function glmAuthFor(ctx) {
   for (const config of GLM_PROVIDERS) {
-    // Older pi builds do not know zai-coding-cn; an unknown-provider throw simply means "no key here".
-    const key = await apiKeyFor(ctx, config.provider).catch(() => undefined);
+    const key = await vendorApiKeyFor(ctx, config.provider, config.endpoint);
     if (key) return { ...config, key };
   }
   return undefined;
@@ -722,7 +752,7 @@ export async function fetchMinimax(ctx) {
   let auth;
   let payAsYouGo = false;
   for (const config of MINIMAX_PROVIDERS) {
-    const key = await apiKeyFor(ctx, config.provider).catch(() => undefined);
+    const key = await vendorApiKeyFor(ctx, config.provider, config.host);
     if (!key) continue;
     if (key.startsWith("sk-api-")) {
       payAsYouGo = true;

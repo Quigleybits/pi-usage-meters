@@ -55,8 +55,21 @@ function withFetch(fn, run) {
   return Promise.resolve(run()).finally(() => { globalThis.fetch = original; });
 }
 
+const vendorBaseUrls = {
+  zai: "https://api.z.ai/api/coding/paas/v4",
+  "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4",
+  minimax: "https://api.minimax.io/anthropic",
+  "minimax-cn": "https://api.minimaxi.com/anthropic",
+};
+const vendorProvider = (provider) => {
+  const baseUrl = vendorBaseUrls[provider];
+  return baseUrl ? { baseUrl, getAllModels: () => [{ baseUrl }] } : undefined;
+};
 const authContext = (entries = {}) => ({
-  modelRegistry: { getProviderAuth: async (provider) => entries[provider] },
+  modelRegistry: {
+    getProvider: vendorProvider,
+    getProviderAuth: async (provider) => entries[provider],
+  },
 });
 const oauth = (token = "oauth-token") => ({ source: "OAuth", auth: { apiKey: token } });
 
@@ -503,6 +516,158 @@ test("Codex shows the usage credit balance separately from banked resets", async
       assert.doesNotMatch((await fetchCodex(ctx)).join("\n"), /Credits/);
     });
   }
+});
+
+const vendorCandidates = [
+  ["zai", fetchGlm, "https://api.z.ai/api/monitor/usage/quota/limit", "Bearer private-fixture-key"],
+  ["zai-coding-cn", fetchGlm, "https://open.bigmodel.cn/api/monitor/usage/quota/limit", "private-fixture-key"],
+  ["minimax", fetchMinimax, "https://api.minimax.io/v1/token_plan/remains", "Bearer private-fixture-key"],
+  ["minimax-cn", fetchMinimax, "https://api.minimaxi.com/v1/token_plan/remains", "Bearer private-fixture-key"],
+];
+const vendorAuth = (extra = {}) => ({ source: "apiKey", auth: { apiKey: "private-fixture-key", ...extra } });
+const candidateContext = (provider, configured = vendorProvider(provider), auth = vendorAuth()) => ({
+  modelRegistry: {
+    getProvider: (id) => id === provider ? configured : undefined,
+    getProviderAuth: async (id) => id === provider ? auth : undefined,
+  },
+});
+
+async function assertUnmetered(fetcher, ctx, label) {
+  let requests = 0;
+  await withFetch(async () => { requests++; return json({}); }, async () => {
+    await assert.rejects(fetcher(ctx), (error) => {
+      assert.equal(error.name, "NotConnected", label);
+      assert.doesNotMatch(`${error.message} ${error.hint} ${error.stack}`, /private-fixture-key/, label);
+      return true;
+    }, label);
+  });
+  assert.equal(requests, 0, label);
+}
+
+for (const [provider, fetcher, quotaUrl, authorization] of vendorCandidates) {
+  test(`API-key vendor metering skips a foreign provider host for ${provider}`, async () => {
+    const configured = { ...vendorProvider(provider), baseUrl: "https://proxy.example.test/v1" };
+    await assertUnmetered(fetcher, candidateContext(provider, configured));
+  });
+
+  test(`API-key vendor metering accepts exact vendor URLs and resolves auth once for ${provider}`, async () => {
+    const host = new URL(vendorBaseUrls[provider]).hostname;
+    for (const accessor of ["getAllModels", "getModels"]) {
+      let resolutions = 0;
+      const configured = {
+        baseUrl: `https://${host.toUpperCase()}:443/provider/path`,
+        [accessor]: () => [{ baseUrl: `https://${host}/model/path` }],
+      };
+      const ctx = candidateContext(provider, configured);
+      ctx.modelRegistry.getProviderAuth = async (id) => {
+        if (id !== provider) return undefined;
+        resolutions++;
+        return resolutions === 1
+          ? vendorAuth(accessor === "getModels" ? { baseUrl: `https://${host}:443/auth/path` } : {})
+          : vendorAuth({ baseUrl: "https://proxy.example.test/v1", apiKey: "second-fixture-key" });
+      };
+      const requests = [];
+      await withFetch(async (url, init) => {
+        requests.push([String(url), init.headers.Authorization]);
+        return json(fetcher === fetchGlm ? { data: { limits: [{ type: "TOKENS_LIMIT", percentage: 25 }] } } : minimaxFixture());
+      }, async () => {
+        const lines = await fetcher(ctx);
+        assert.ok(lines.length > 1);
+        assert.doesNotMatch(lines.join("\n"), /private-fixture-key|second-fixture-key/);
+      });
+      assert.deepEqual(requests, [[quotaUrl, authorization]]);
+      assert.equal(resolutions, 1);
+    }
+  });
+
+  test(`API-key vendor metering validates provider, model and auth URLs for ${provider}`, async () => {
+    const host = new URL(vendorBaseUrls[provider]).hostname;
+    const invalidUrls = [
+      undefined, null, 42, "", "not a URL", "/relative/path", new URL(vendorBaseUrls[provider]),
+      `http://${host}/v1`, `https://${host}.example.test/v1`, `https://${host}./v1`,
+      `https://${host}:444/v1`, `https://user@${host}/v1`, `https://:private-fixture-key@${host}/v1`,
+    ];
+    for (const [index, baseUrl] of invalidUrls.entries()) {
+      const valid = vendorProvider(provider);
+      await assertUnmetered(fetcher, candidateContext(provider, { ...valid, baseUrl }), `provider URL case ${index}`);
+      await assertUnmetered(fetcher, candidateContext(provider, {
+        ...valid, getAllModels: () => [{ baseUrl }],
+      }), `model URL case ${index}`);
+      await assertUnmetered(fetcher, candidateContext(provider, valid, vendorAuth({ baseUrl })), `auth URL case ${index}`);
+    }
+    await assertUnmetered(fetcher, candidateContext(provider, vendorProvider(provider), vendorAuth({
+      baseUrl: "https://proxy.example.test/v1",
+    })), "foreign request-time auth override");
+  });
+
+  test(`API-key vendor metering declines mixed model hosts for ${provider}`, async () => {
+    const configured = {
+      ...vendorProvider(provider),
+      getAllModels: () => [
+        { baseUrl: vendorBaseUrls[provider] },
+        { baseUrl: "https://proxy.example.test/custom-model" },
+      ],
+      getModels: () => [{ baseUrl: vendorBaseUrls[provider] }],
+    };
+    await assertUnmetered(fetcher, candidateContext(provider, configured));
+  });
+
+  test(`API-key vendor metering skips unavailable provider catalogs for ${provider}`, async () => {
+    const baseUrl = vendorBaseUrls[provider];
+    const fail = () => { throw new Error("private-fixture-key"); };
+    const catalogs = [
+      {}, { baseUrl }, { baseUrl, getAllModels: null, getModels: () => [{ baseUrl }] },
+      { baseUrl, getAllModels: fail, getModels: () => [{ baseUrl }] },
+      { baseUrl, getModels: fail },
+      ...[undefined, null, {}, [], [null], [{}], new Array(1)].map((models) => ({ baseUrl, getAllModels: () => models })),
+    ];
+    for (const [index, configured] of catalogs.entries()) {
+      await assertUnmetered(fetcher, candidateContext(provider, configured), `catalog case ${index}`);
+    }
+    for (const getProvider of [undefined, () => undefined, fail]) {
+      const ctx = candidateContext(provider);
+      ctx.modelRegistry.getProvider = getProvider;
+      await assertUnmetered(fetcher, ctx, "unavailable provider lookup");
+    }
+    const ctx = candidateContext(provider);
+    ctx.modelRegistry.getProviderAuth = fail;
+    await assertUnmetered(fetcher, ctx, "throwing auth lookup");
+  });
+}
+
+for (const [global, regional, fetcher, quotaUrl, authorization] of [
+  ["zai", "zai-coding-cn", fetchGlm, "https://open.bigmodel.cn/api/monitor/usage/quota/limit", "regional-fixture-key"],
+  ["minimax", "minimax-cn", fetchMinimax, "https://api.minimaxi.com/v1/token_plan/remains", "Bearer regional-fixture-key"],
+]) {
+  test(`API-key vendor metering falls back to ${regional} when ${global} is redirected`, async () => {
+    const ctx = authContext({
+      [global]: vendorAuth(),
+      [regional]: { source: "apiKey", auth: { apiKey: "regional-fixture-key" } },
+    });
+    ctx.modelRegistry.getProvider = (id) => id === global
+      ? { ...vendorProvider(id), baseUrl: "https://proxy.example.test/v1" }
+      : vendorProvider(id);
+    const requests = [];
+    await withFetch(async (url, init) => {
+      requests.push([String(url), init.headers.Authorization]);
+      return json(fetcher === fetchGlm ? { data: { limits: [{ type: "TOKENS_LIMIT", percentage: 25 }] } } : minimaxFixture());
+    }, async () => { assert.ok((await fetcher(ctx)).length > 1); });
+    assert.deepEqual(requests, [[quotaUrl, authorization]]);
+  });
+}
+
+test("API-key vendor metadata errors never expose keys in loader output", async () => {
+  const ctx = authContext(Object.fromEntries(vendorCandidates.map(([provider]) => [provider, vendorAuth()])));
+  ctx.modelRegistry.getProvider = () => { throw new Error("private-fixture-key"); };
+  let requests = 0;
+  await withFetch(async () => { requests++; return json({}); }, async () => {
+    const data = await createUsageLoader()(ctx, true);
+    for (const name of ["GLM", "MiniMax"]) {
+      assert.equal(data.blocks.find((block) => block.name === name).status, "unconnected");
+    }
+    assert.doesNotMatch(JSON.stringify(data) + renderContent(data), /private-fixture-key/);
+  });
+  assert.equal(requests, 0);
 });
 
 test("GLM parses API-key auth and splits credit windows by reset horizon", async () => {
@@ -1249,6 +1414,7 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   let resolutions = 0;
   const ctx = {
     modelRegistry: {
+      getProvider: vendorProvider,
       getProviderAuth: async () => {
         resolutions++;
         await new Promise((resolve) => setTimeout(resolve, 5));
