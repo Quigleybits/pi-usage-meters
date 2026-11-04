@@ -771,14 +771,34 @@ test("network failures surface as network error with system code", async () => {
   });
 });
 
-test("fetches refuse redirects and a stalled provider reports the 8 s budget", async () => {
+test("fetches refuse redirects", async () => {
   let init;
   await withFetch(async (_url, options) => {
     init = options;
     return json({});
   }, () => getJson("https://example.test", "token"));
   assert.equal(init.redirect, "error");
+});
 
+test("request timeout aborts a stalled fetch", { timeout: 2000 }, async () => {
+  let watchdog;
+  let signal;
+  let onAbort;
+  try {
+    await withFetch((_url, options) => new Promise((_resolve, reject) => {
+      signal = options.signal;
+      onAbort = () => reject(new DOMException("aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      watchdog = setTimeout(() => reject(new Error("request did not abort")), 1000);
+    }), () => assert.rejects(getJson("https://example.test", "token", {}, 20), /^Error: timed out after 20ms$/));
+    assert.equal(signal.aborted, true);
+  } finally {
+    clearTimeout(watchdog);
+    signal?.removeEventListener("abort", onAbort);
+  }
+});
+
+test("loader renders request timeouts in plain words and keeps the budget in debug data", async () => {
   const load = createUsageLoader();
   await withFetch(async () => {
     const error = new Error("aborted");
@@ -1239,9 +1259,11 @@ test("loader caches sequential calls and deduplicates concurrent calls", async (
   const load = createUsageLoader();
   const [a, b] = await Promise.all([load(ctx), load(ctx)]);
   assert.equal(a, b);
-  assert.equal(resolutions, 9); // 5 OAuth + zai/zai-coding-cn + minimax/minimax-cn
+  // Each provider block resolves once; GLM and MiniMax also try their regional alias.
+  const expectedResolutions = a.blocks.length + ["zai-coding-cn", "minimax-cn"].length;
+  assert.equal(resolutions, expectedResolutions);
   assert.equal(await load(ctx), a);
-  assert.equal(resolutions, 9);
+  assert.equal(resolutions, expectedResolutions);
 });
 
 for (const [label, age, fresh] of [
