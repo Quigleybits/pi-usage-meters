@@ -31,7 +31,7 @@ The workflow grants only `contents: read` and `id-token: write`, checks out the 
    git status --short
    ```
 
-3. Commit and push the release candidate, then wait for CI to pass on Node 20 and Node 24:
+3. Commit and push the release candidate, then wait for CI to pass on Node 22 and Node 24:
 
    ```bash
    git push origin main

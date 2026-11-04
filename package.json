@@ -43,7 +43,7 @@
     "url": "https://github.com/Quigleybits/pi-usage-meters/issues"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "publishConfig": {
     "access": "public"
@@ -54,6 +54,7 @@
     ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   }
 }
