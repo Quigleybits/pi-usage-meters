@@ -44,7 +44,7 @@ Only providers you are connected to get a block. Everything else collapses into 
 - API responses are size-limited; untrusted strings are length-limited and stripped of terminal controls, ANSI, and bidirectional-text controls both before storage and again at render time.
 - Each provider fetch is isolated. Every request is capped at 8 s, and the whole provider, login lookup included, at 10 s: one failure or stall never blanks the others.
 
-**Privacy note:** `/usage` stores plan labels, quota percentages, reset times, and any displayed spend figures in the current pi session. Exporting or sharing that session includes this output. Do not share the session if those account details are sensitive. The README screenshot uses synthetic fixture values, not live account data.
+**Privacy note:** `/usage` stores plan labels, quota percentages, reset times, and any displayed spend figures in the current pi session. Exporting or sharing that session includes this output. Do not share the session if those account details are sensitive.
 
 ## Notes & caveats
 
