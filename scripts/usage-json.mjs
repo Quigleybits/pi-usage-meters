@@ -3,9 +3,9 @@ import { execSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { fetchAnthropic, fetchCodex, fetchXai, LoginFailed, NotConnected, PROVIDER_DEADLINE_MS, withDeadline } from "../extensions/core.js";
+import { clampPct, fetchAnthropic, fetchCodex, fetchXai, LoginFailed, NotConnected, PROVIDER_DEADLINE_MS, withDeadline } from "../extensions/core.js";
 
-const PROVIDERS = [["Claude", fetchAnthropic, "Week (all models)"], ["Codex", fetchCodex, "Week"], ["Grok", fetchXai, "Week (credits)"]];
+const PROVIDERS = [["Claude", fetchAnthropic], ["Codex", fetchCodex], ["Grok", fetchXai]];
 // A login lookup that failed for a reason other than an expiry gets the same plain words as /usage.
 const LOGIN_WORDS = { network: "network error", provider: "provider error", "rate-limited": "rate limited", timeout: "timed out" };
 const safeError = (error) => error instanceof NotConnected ? "not connected"
@@ -13,18 +13,20 @@ const safeError = (error) => error instanceof NotConnected ? "not connected"
   : ({ 401: "login expired", 402: "no credits left", 403: "access denied", 429: "rate limited" })[error?.status]
     ?? (error?.status >= 500 ? "provider error" : /^timed out after \d+ms$/.test(error?.message) ? "timed out" : "usage unavailable");
 
+export function weeklyUsage(name, lines) {
+  const meter = lines.meterRows?.find((row) => row.kind === "weekly");
+  if (!Number.isFinite(meter?.pct) || !Number.isFinite(meter.resetMs)) return { name, error: "weekly usage not shown" };
+  const banked = name === "Codex" ? lines.bankedResets : null;
+  return { name, left: 100 - Math.round(clampPct(meter.pct)), reset: meter.reset.text, reset_s: meter.reset.seconds,
+    banked: banked?.count > 0 ? `${banked.count} banked resets${banked.dates.length ? `, use by ${banked.dates.join(", ")}` : ""}` : null };
+}
+
 // deadlineMs: the same per-provider deadline as /usage, login lookup included; tests shorten it.
 export async function usageJson(modelRegistry, { deadlineMs = PROVIDER_DEADLINE_MS } = {}) {
-  const providers = await Promise.all(PROVIDERS.map(async ([name, fetcher, label]) => {
+  const providers = await Promise.all(PROVIDERS.map(async ([name, fetcher]) => {
     try {
-      const lines = (await withDeadline(fetcher({ modelRegistry }), deadlineMs)).map(line => line.replace(/\x1b\[[0-9;]*m/g, ""));
-      const row = lines.find(line => line.trimStart().startsWith(label + " "));
-      const meter = row?.match(/(\d+)%\s+reset\s+\S\s+(\d+d(?:\s+\d+h)?|\d+h(?:\s+\d+m)?|\d+m|<1m|soon)\s*$/);
-      if (!meter) return { name, error: "weekly usage not shown" };
-      const reset_s = /^(<1m|soon)$/.test(meter[2]) ? 0 : [...meter[2].matchAll(/(\d+)([dhm])/g)].reduce((sum, [, n, unit]) => sum + Number(n) * ({ d: 86400, h: 3600, m: 60 })[unit], 0);
-      const banked = name === "Codex" && lines.find(line => line.trimStart().startsWith("Banked resets "))?.match(/(●+)(?:\+(\d+))?(?: use by: (.+))?$/);
-      return { name, left: 100 - Number(meter[1]), reset: meter[2], reset_s,
-        banked: banked ? `${banked[1].length + Number(banked[2] || 0)} banked resets${banked[3] ? `, use by ${banked[3]}` : ""}` : null };
+      const lines = await withDeadline(fetcher({ modelRegistry }), deadlineMs);
+      return weeklyUsage(name, lines);
     } catch (error) {
       return { name, error: safeError(error) };
     }

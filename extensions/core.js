@@ -92,9 +92,9 @@ export function pct(used, limit) {
   return Number.isFinite(u) && Number.isFinite(l) && l > 0 ? clampPct((u / l) * 100) : NaN;
 }
 
-export function fmtReset(ms) {
-  const delta = ms - Date.now();
-  if (!Number.isFinite(delta) || delta <= 0) return "soon";
+function resetDuration(ms, now) {
+  const delta = ms - now;
+  if (!Number.isFinite(delta) || delta <= 0) return { text: "soon", seconds: 0 };
   const minutes = Math.round(delta / 60_000);
   const days = Math.floor(minutes / 1440);
   const hours = Math.floor((minutes % 1440) / 60);
@@ -103,13 +103,17 @@ export function fmtReset(ms) {
   if (days) parts.push(`${days}d`);
   if (hours) parts.push(`${hours}h`);
   if (!days && mins) parts.push(`${mins}m`);
-  return parts.join(" ") || "<1m";
+  return { text: parts.join(" ") || "<1m", seconds: days * 86400 + hours * 3600 + (days ? 0 : mins * 60) };
+}
+
+export function fmtReset(ms) {
+  return resetDuration(ms, Date.now()).text;
 }
 
 const PIE = ["○", "◔", "◑", "◕", "●"];
-export function pie(windowMs, resetMs) {
+export function pie(windowMs, resetMs, now = Date.now()) {
   if (!Number.isFinite(windowMs) || windowMs <= 0 || !Number.isFinite(resetMs)) return PIE[0];
-  const remaining = Math.max(0, Math.min(1, (resetMs - Date.now()) / windowMs));
+  const remaining = Math.max(0, Math.min(1, (resetMs - now) / windowMs));
   return PIE[Math.round((1 - remaining) * (PIE.length - 1))];
 }
 
@@ -123,12 +127,12 @@ function cleanKeepIndent(value, max = 200) {
 
 const field = (label) => cleanKeepIndent(label, LABEL_W).padEnd(LABEL_W);
 
-export function line(label, value, resetMs, windowMs) {
+export function line(label, value, resetMs, windowMs, now = Date.now()) {
   const usedPct = clampPct(value);
   const clock = Number.isFinite(resetMs)
     ? Number.isFinite(windowMs) && windowMs > 0
-      ? ` reset ${pie(windowMs, resetMs)} ${fmtReset(resetMs)}`
-      : ` reset ${fmtReset(resetMs)}`
+      ? ` reset ${pie(windowMs, resetMs, now)} ${resetDuration(resetMs, now).text}`
+      : ` reset ${resetDuration(resetMs, now).text}`
     : "";
   return `  ${field(label)} ${bar(usedPct)} ${String(Math.round(usedPct)).padStart(3)}%${clock}`;
 }
@@ -138,11 +142,21 @@ export function plain(label, text) {
 }
 
 // A reported window without a usable percentage says so instead of drawing a 0% bar.
-function meter(label, value, resetMs, windowMs) {
+function meter(label, value, resetMs, windowMs, now = Date.now()) {
   return Number.isFinite(value)
-    ? line(label, value, resetMs, windowMs)
+    ? line(label, value, resetMs, windowMs, now)
     : plain(label, "window reported, reading unavailable");
 }
+
+// Semantic rows stay off array enumeration and persisted JSON; direct callers still receive strings.
+function addMeter(lines, kind, label, value, resetMs, windowMs) {
+  const now = Date.now();
+  if (!lines.meterRows) Object.defineProperty(lines, "meterRows", { value: [] });
+  lines.meterRows.push({ kind, pct: value, resetMs, windowMs, reset: resetDuration(resetMs, now) });
+  lines.push(meter(label, value, resetMs, windowMs, now));
+}
+
+const weeklyWindow = (ms) => Math.round(ms / 60e3) === D7 / 60e3;
 
 const windowLabel = (ms) => {
   const minutes = Math.round(ms / 60e3);
@@ -390,7 +404,7 @@ export async function fetchAnthropic(ctx) {
     }
   }
   if (usage.seven_day) {
-    lines.push(meter("Week (all models)", reading(usage.seven_day.utilization), Date.parse(usage.seven_day.resets_at), D7));
+    addMeter(lines, "weekly", "Week (all models)", reading(usage.seven_day.utilization), Date.parse(usage.seven_day.resets_at), D7);
   }
   for (const limit of (Array.isArray(usage.limits) ? usage.limits : []).slice(0, 10)) {
     if (limit.group === "weekly" && limit.scope?.model?.display_name) {
@@ -442,7 +456,8 @@ export async function fetchCodex(ctx, { clock = Date.now } = {}) {
   for (const window of [usage.rate_limit?.primary_window, usage.rate_limit?.secondary_window]) {
     if (!window) continue;
     const seconds = Number(window.limit_window_seconds) || 0;
-    lines.push(meter(windowLabel(seconds * 1000), reading(window.used_percent), Number(window.reset_at) * 1000, seconds * 1000));
+    const windowMs = seconds * 1000;
+    addMeter(lines, weeklyWindow(windowMs) ? "weekly" : "session", windowLabel(windowMs), reading(window.used_percent), Number(window.reset_at) * 1000, windowMs);
   }
   const creditText = codexCreditText(usage.credits);
   if (creditText) lines.push(plain("Credits", creditText));
@@ -461,6 +476,9 @@ export async function fetchCodex(ctx, { clock = Date.now } = {}) {
       .filter(Boolean);
     const overflow = banked > visible ? `+${banked - visible}` : "";
     const expiry = dates.length ? ` use by: ${dates.join(", ")}` : "";
+    // Infinite and scientific-notation overflow counts have never produced a banked summary.
+    const count = Number.isFinite(banked) && banked < 1e21 ? visible + (banked - visible) : null;
+    Object.defineProperty(lines, "bankedResets", { value: { count, dates } });
     lines.push(plain("Banked resets", `${"●".repeat(visible)}${overflow}${expiry}`));
   }
   return lines;
@@ -523,7 +541,7 @@ export async function fetchXai(ctx) {
   );
 
   if (weekly) {
-    lines.push(meter("Week (credits)", creditPct, end, periodMs));
+    addMeter(lines, "weekly", "Week (credits)", creditPct, end, periodMs);
     const products = (Array.isArray(config.productUsage) ? config.productUsage : []).slice(0, 8).flatMap((product) => {
       const productPct = reading(product?.usagePercent);
       return Number.isFinite(productPct) ? [{ name: grokProductLabel(product.product), pct: productPct }] : [];
