@@ -1,7 +1,7 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -299,7 +299,7 @@ test("login refresh failures that are not an expiry use the same plain words as 
   assert.ok(!JSON.stringify([data, again]).includes(secret));
 });
 
-// pi loading. Offline: a stub pi package whose registry holds no logins, so no provider is called.
+// pi loading. Offline: test-owned SDK/auth/fetch fixtures never load real logins.
 const REPO = new URL("..", import.meta.url);
 const PI_STUB = [
   "export class ModelRuntime { static async create() { return {}; } }",
@@ -307,16 +307,16 @@ const PI_STUB = [
 ].join("\n");
 
 // A stub pi package at <root>/@earendil-works/pi-coding-agent. `extra` runs when it is imported.
-function writePi(root, extra = "") {
+function writePi(root, extra = "", sdk = PI_STUB) {
   const dir = join(root, "@earendil-works", "pi-coding-agent");
   mkdirSync(join(dir, "dist"), { recursive: true });
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", type: "module", exports: "./dist/index.js" }));
-  writeFileSync(join(dir, "dist", "index.js"), `${extra}\n${PI_STUB}\n`);
+  writeFileSync(join(dir, "dist", "index.js"), `${extra}\n${sdk}\n`);
   return dir;
 }
 
 // A copy of the runner (and core.js) in a temp tree, plus an npm prefix whose global root holds a stub pi.
-function runnerSandbox() {
+function runnerSandbox({ extra = "", sdk = PI_STUB, responses = {} } = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "usage-json-load-")));
   const app = join(base, "app");
   mkdirSync(join(app, "scripts"), { recursive: true });
@@ -324,20 +324,140 @@ function runnerSandbox() {
   copyFileSync(new URL("scripts/usage-json.mjs", REPO), join(app, "scripts", "usage-json.mjs"));
   copyFileSync(new URL("extensions/core.js", REPO), join(app, "extensions", "core.js"));
   const prefix = join(base, "prefix");
-  writePi(process.platform === "win32" ? join(prefix, "node_modules") : join(prefix, "lib", "node_modules"));
+  const requests = join(base, "requests.ndjson");
+  writeFileSync(requests, "");
+  const setup = `
+    import { appendFileSync } from "node:fs";
+    Date.now = () => ${NOW};
+    const responses = ${JSON.stringify(responses)};
+    globalThis.fetch = async (url, options = {}) => {
+      const method = options.method ?? "GET";
+      appendFileSync(${JSON.stringify(requests)}, JSON.stringify({ url: String(url), method }) + "\\n");
+      if (method !== "GET" || !Object.hasOwn(responses, String(url))) throw new Error("unexpected offline request");
+      return new Response(JSON.stringify(responses[String(url)]), { status: 200 });
+    };
+    ${extra}
+  `;
+  writePi(process.platform === "win32" ? join(prefix, "node_modules") : join(prefix, "lib", "node_modules"), setup, sdk);
   const caller = join(base, "caller");
   mkdirSync(caller);
-  return { base, runner: join(app, "scripts", "usage-json.mjs"), prefix, caller };
+  return { base, runner: join(app, "scripts", "usage-json.mjs"), prefix, caller, requests };
 }
 
 // Runs the runner as `cos usage` would, from `cwd`, with Windows' default search of the current folder.
-function runRunner({ runner, prefix }, cwd) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toLowerCase() !== "nodefaultcurrentdirectoryinexepath"));
+function runRunner({ base, runner, prefix }, cwd) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !["nodefaultcurrentdirectoryinexepath", "npm_config_prefix", "pi_usage_meters_state"].includes(name.toLowerCase())));
   env.npm_config_prefix = prefix;
-  return spawnSync(process.execPath, [runner], { cwd, env, encoding: "utf8", timeout: 30_000 });
+  env.PI_USAGE_METERS_STATE = join(base, "runner-state.json");
+  env.TZ = "UTC";
+  // node:test cannot interrupt spawnSync; this watchdog kills and reaps this child independently.
+  return spawnSync(process.execPath, [runner], { cwd, env, encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL" });
 }
 
 const NOT_CONNECTED = ["Claude", "Codex", "Grok"].map((name) => ({ name, error: "not connected" }));
+
+for (const failure of ["import", "runtime"]) {
+  test(`CLI ${failure} setup failure exits unsuccessfully without leaking diagnostics`, { timeout: 40_000 }, () => {
+    const sandbox = runnerSandbox({
+      extra: failure === "import" ? `throw new Error(${JSON.stringify(secret)});` : "",
+      sdk: failure === "runtime"
+        ? `export class ModelRuntime { static async create() { throw new Error(${JSON.stringify(secret)}); } }
+           export class ModelRegistry { async getProviderAuth() { return undefined; } }`
+        : PI_STUB,
+    });
+    try {
+      const result = runRunner(sandbox, sandbox.caller);
+      assert.ifError(result.error);
+      assert.equal(result.status, 1, "a setup failure must return a failing exit status");
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr, "usage runner setup failed (pi unavailable or login storage unreadable)\n");
+      assert.ok(!`${result.stdout}${result.stderr}`.includes(secret));
+      assert.equal(readFileSync(sandbox.requests, "utf8"), "");
+    } finally {
+      rmSync(sandbox.base, { recursive: true, force: true });
+    }
+  });
+}
+
+test("CLI exits after writing complete JSON despite a live SDK timer", { timeout: 40_000 }, () => {
+  const sandbox = runnerSandbox({ extra: "setInterval(() => {}, 1000);" });
+  try {
+    const result = runRunner(sandbox, sandbox.caller);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      providers: [
+        { name: "Claude", error: "not connected" },
+        { name: "Codex", error: "not connected" },
+        { name: "Grok", error: "not connected" },
+      ],
+      fetchedAt: "2026-11-02T10:00:00.000Z",
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, "the runner must exit successfully before its subprocess watchdog");
+    assert.equal(result.stderr, "");
+    assert.ok(result.stdout.endsWith("\n"));
+    assert.equal(readFileSync(sandbox.requests, "utf8"), "");
+  } finally {
+    rmSync(sandbox.base, { recursive: true, force: true });
+  }
+});
+
+test("CLI deadline returns a stalled login and complete sibling readings", { timeout: 40_000 }, () => {
+  const parentState = process.env.PI_USAGE_METERS_STATE;
+  const previousState = existsSync(parentState) ? readFileSync(parentState, "utf8") : undefined;
+  const sandbox = runnerSandbox({
+    sdk: `
+      export class ModelRuntime { static async create() { return {}; } }
+      export class ModelRegistry {
+        async getProviderAuth(provider) {
+          if (provider === "anthropic") return new Promise(() => {});
+          if (provider !== "openai-codex" && provider !== "xai") throw new Error("unexpected offline auth provider");
+          return { source: "OAuth", auth: { apiKey: ${JSON.stringify(secret)} } };
+        }
+      }
+    `,
+    responses: {
+      "https://chatgpt.com/backend-api/wham/usage": {
+        rate_limit: { secondary_window: { limit_window_seconds: 604800, used_percent: 79, reset_at: 1793844000 } },
+        rate_limit_reset_credits: { available_count: 2 },
+      },
+      "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits": {
+        credits: [{ expires_at: "2026-11-06T10:00:00Z" }, { expires_at: "2026-11-30T10:00:00Z" }],
+      },
+      "https://cli-chat-proxy.grok.com/v1/billing?format=credits": {
+        config: { creditUsagePercent: 16, currentPeriod: {
+          start: "2026-10-28T19:00:00Z", end: "2026-11-04T19:00:00Z", type: "USAGE_PERIOD_TYPE_WEEKLY",
+        } },
+      },
+      "https://cli-chat-proxy.grok.com/v1/settings": {},
+    },
+  });
+  try {
+    const result = runRunner(sandbox, sandbox.caller);
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, "the real provider deadline must finish before the subprocess watchdog");
+    assert.equal(result.stderr, "");
+    assert.deepEqual(JSON.parse(result.stdout), {
+      providers: [
+        { name: "Claude", error: "timed out" },
+        { name: "Codex", left: 21, reset: "2d 16h", reset_s: 230400, banked: "2 banked resets, use by 6 Nov, 30 Nov" },
+        { name: "Grok", left: 84, reset: "2d 9h", reset_s: 205200, banked: null },
+      ],
+      fetchedAt: "2026-11-02T10:00:00.000Z",
+    });
+    assert.ok(!`${result.stdout}${result.stderr}`.includes(secret));
+    assert.deepEqual(readFileSync(sandbox.requests, "utf8").trim().split("\n").map((line) => JSON.parse(line)).sort((a, b) => a.url.localeCompare(b.url)), [
+      { url: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", method: "GET" },
+      { url: "https://chatgpt.com/backend-api/wham/usage", method: "GET" },
+      { url: "https://cli-chat-proxy.grok.com/v1/billing?format=credits", method: "GET" },
+      { url: "https://cli-chat-proxy.grok.com/v1/settings", method: "GET" },
+    ]);
+    assert.equal(JSON.parse(readFileSync(join(sandbox.base, "runner-state.json"), "utf8")).xai.pct, 16);
+    assert.equal(existsSync(parentState) ? readFileSync(parentState, "utf8") : undefined, previousState);
+  } finally {
+    rmSync(sandbox.base, { recursive: true, force: true });
+  }
+});
 
 test("a pi package planted in a parent node_modules folder is never imported", { timeout: 40_000 }, () => {
   const sandbox = runnerSandbox();
