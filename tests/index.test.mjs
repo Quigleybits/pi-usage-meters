@@ -195,7 +195,8 @@ test("Claude money honours currency exponent", async () => {
   });
 });
 
-const claudeFetch = (usage, profile = {}) => async (url) => {
+const claudeFetch = (usage, profile = {}, cedar = null) => async (url) => {
+  if (new URL(url).searchParams.has("cedar_ember")) return cedar instanceof Response ? cedar : json(cedar);
   if (String(url).endsWith("/profile")) return profile instanceof Response ? profile : json(profile);
   return json(usage);
 };
@@ -207,6 +208,79 @@ const max5 = { organization: { rate_limit_tier: "default_claude_max_5x" } };
 const pro = { account: { has_claude_pro: true } };
 const week = { utilization: 25, resets_at: inHours(72) };
 const session = (lines) => lines.filter((text) => /^  Session \(5h\)/.test(text));
+
+test("Claude Fable resets use a separate CLI-surface request and deduplicate expiry dates", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  const usage = {
+    seven_day: week,
+    limits: [{ group: "weekly", scope: { model: { display_name: "Opus" } }, percent: 7, resets_at: inHours(72) }],
+    extra_usage: { credits_ever_enabled: true, is_enabled: true, currency: "USD", used_credits: 150, monthly_limit: 5000 },
+  };
+  const grant = { gives_back_weekly: true, resets_left: 1, ends_at: "2099-03-09T12:00:00" };
+  const respond = claudeFetch(usage, max5, { cedar_ember: { eligible: true, grants: [grant, grant] } });
+  const requests = new Map();
+  await withFetch(async (url, init) => {
+    requests.set(String(url), new Headers(init.headers));
+    return respond(url);
+  }, async () => {
+    const lines = await fetchAnthropic(ctx);
+    const index = lines.findIndex((text) => text.includes("Fable resets"));
+    assert.equal(lines[index], `  ${"Fable resets".padEnd(22)} ●● use by: 9 Mar`);
+    assert.match(lines[index - 1], /Week \(Opus\)/);
+    assert.match(lines[index + 1], /Extra usage/);
+    assert.deepEqual(lines.bankedResets, { count: 2, dates: ["9 Mar"] });
+    assert.equal(Object.getOwnPropertyDescriptor(lines, "bankedResets").enumerable, false);
+    assert.equal(JSON.stringify(lines), JSON.stringify([...lines]));
+  });
+  assert.equal(requests.size, 3);
+  assert.equal(requests.get("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1").get("User-Agent"), "claude-cli/2.1.280 (external, cli)");
+  for (const path of ["usage", "profile"]) {
+    assert.equal(requests.get(`https://api.anthropic.com/api/oauth/${path}`).has("User-Agent"), false);
+  }
+});
+
+test("Claude Fable resets leave the block unchanged on failure or without eligible remaining grants", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  const grant = { gives_back_weekly: true, resets_left: 1, ends_at: "2099-03-09T12:00:00" };
+  const usage = { seven_day: week, cedar_ember: { eligible: true, grants: [grant] } };
+  const baseline = await withFetch(claudeFetch(usage, max5), () => fetchAnthropic(ctx));
+  const invalidGrants = [
+    null, { ...grant, gives_back_weekly: false }, { ...grant, gives_back_weekly: "true" },
+    ...[0, -1, 0.9, "1", null, "Infinity"].map((resets_left) => ({ ...grant, resets_left })),
+    { ...grant, ends_at: "2000-03-09T12:00:00Z" },
+  ];
+  for (const cedar of [
+    json({}, { status: 429 }), null, "unavailable", {}, { cedar_ember: null },
+    { cedar_ember: { eligible: false, grants: [grant] } },
+    { cedar_ember: { eligible: "true", grants: [grant] } },
+    { cedar_ember: { eligible: true, grants: {} } },
+    { cedar_ember: { eligible: true, grants: [] } },
+    { cedar_ember: { eligible: true, grants: invalidGrants } },
+  ]) {
+    await withFetch(claudeFetch(usage, max5, cedar), async () => {
+      const lines = await fetchAnthropic(ctx);
+      assert.deepEqual(lines, baseline);
+      assert.doesNotMatch(lines.join("\n"), /Fable resets/);
+      assert.equal(Object.hasOwn(lines, "bankedResets"), false);
+    });
+  }
+});
+
+test("Claude Fable resets truncate counts, cap the grant scan and dots, and retain unknown expiries", async () => {
+  const ctx = authContext({ anthropic: oauth() });
+  const grant = { gives_back_weekly: true, resets_left: 1.9, ends_at: "2099-03-09T12:00:00" };
+  for (const [grants, count, dates, text] of [
+    [[grant, { ...grant, resets_left: 2.7, ends_at: "2099-03-10T12:00:00" }, grant, { ...grant, ends_at: "unknown" }], 5, ["9 Mar", "10 Mar"], "●●●●● use by: 9 Mar, 10 Mar"],
+    [[{ ...grant, resets_left: 25 }, ...Array(19).fill(null), { ...grant, resets_left: 99 }], 25, ["9 Mar"], `${"●".repeat(20)}+5 use by: 9 Mar`],
+    [[{ ...grant, ends_at: "unknown" }], 1, [], "●"],
+  ]) {
+    await withFetch(claudeFetch({ seven_day: week }, {}, { cedar_ember: { eligible: true, grants } }), async () => {
+      const lines = await fetchAnthropic(ctx);
+      assert.equal(lines.find((line) => line.includes("Fable resets")), `  ${"Fable resets".padEnd(22)} ${text}`);
+      assert.deepEqual(lines.bankedResets, { count, dates });
+    });
+  }
+});
 
 test("Claude plan labels: max_20x is Ultra, max_5x is Max, other tiers and profile fallbacks unchanged", async () => {
   const ctx = authContext({ anthropic: oauth() });

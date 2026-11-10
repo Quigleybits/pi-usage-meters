@@ -19,16 +19,18 @@ const NOW = Date.parse("2026-11-02T10:00:00Z");
 const iso = (hours) => new Date(NOW + hours * 3600000).toISOString();
 const secret = "synthetic-credential-must-never-appear";
 
-async function withUsageFixtures({ auth, usage = {}, codex = {}, grok = {}, expiry, expiryDelayMs = 0, status = {} } = {}, run) {
+async function withUsageFixtures({ auth, usage = {}, cedar = null, codex = {}, grok = {}, expiry, expiryDelayMs = 0, status = {} } = {}, run) {
   const originalFetch = globalThis.fetch;
   const originalNow = Date.now;
   let now = NOW;
   Date.now = () => now;
   globalThis.fetch = async (url) => {
-    const path = new URL(url).pathname;
+    const parsed = new URL(url);
+    const path = parsed.pathname + (parsed.searchParams.has("cedar_ember") ? parsed.search : "");
     if (path === "/backend-api/wham/rate-limit-reset-credits") now += expiryDelayMs;
     const bodies = {
       "/api/oauth/usage": { seven_day: { utilization: 41, resets_at: iso(122) }, ...usage },
+      "/api/oauth/usage?cedar_ember=1&skip_spend=1": cedar,
       "/api/oauth/profile": {},
       "/backend-api/wham/usage": {
         rate_limit: { secondary_window: { limit_window_seconds: 604800, used_percent: 79, reset_at: (NOW / 1000) + 230400 } },
@@ -72,6 +74,15 @@ test("JSON carries only the three weekly meters and Codex banked resets", async 
   });
   assert.equal(JSON.stringify(data), '{"providers":[{"name":"Claude","left":59,"reset":"5d 2h","reset_s":439200,"banked":null},{"name":"Codex","left":21,"reset":"2d 16h","reset_s":230400,"banked":"2 banked resets, use by 6 Nov, 30 Nov"},{"name":"Grok","left":84,"reset":"2d 9h","reset_s":205200,"banked":null}],"fetchedAt":"2026-11-02T10:00:00.000Z"}');
   assert.ok(!JSON.stringify(data).includes(secret));
+});
+
+test("JSON reports Claude Fable resets from the cedar grants", async () => {
+  const grant = { gives_back_weekly: true, resets_left: 1, ends_at: "2099-03-09T12:00:00" };
+  const data = await collect({ cedar: { cedar_ember: { eligible: true, grants: [grant, grant] } } });
+  assert.deepEqual(data.providers[0], {
+    name: "Claude", left: 59, reset: "5d 2h", reset_s: 439200, banked: "2 Fable resets, use by 9 Mar",
+  });
+  assert.equal(data.providers[1].banked, "2 banked resets, use by 6 Nov, 30 Nov");
 });
 
 test("a failed login is safe and does not hide the other providers", async () => {

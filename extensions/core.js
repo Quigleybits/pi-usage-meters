@@ -2,6 +2,8 @@ const TIMEOUT_MS = 8_000;
 // Whole-provider backstop: credential lookup plus requests. Requests keep their own 8 s cap inside it.
 export const PROVIDER_DEADLINE_MS = TIMEOUT_MS + 2_000;
 const OPTIONAL_TIMEOUT_MS = 2_500;
+// The server shows reset grants only to the Claude Code CLI surface; pi sends the same claude-cli identity on its own Claude calls (pi-ai claudeCodeVersion 2.1.280).
+const CLAUDE_CLI_UA = "claude-cli/2.1.280 (external, cli)";
 const CACHE_MS = 60_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_RENDER_LINE = 300;
@@ -408,9 +410,10 @@ export async function fetchAnthropic(ctx) {
   const token = await tokenFor(ctx, "anthropic");
   if (!token) throw noAuth("anthropic");
   const headers = { "anthropic-beta": "oauth-2025-04-20" };
-  const [usage, profile] = await Promise.all([
+  const [usage, profile, resets] = await Promise.all([
     getJson("https://api.anthropic.com/api/oauth/usage", token, headers),
     optionalJson("https://api.anthropic.com/api/oauth/profile", token, headers),
+    optionalJson("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1", token, { ...headers, "User-Agent": CLAUDE_CLI_UA }),
   ]);
   const plan = claudePlanLabel(profile);
   const lines = [header("Claude", plan)];
@@ -441,6 +444,27 @@ export async function fetchAnthropic(ctx) {
     if (limit.group === "weekly" && limit.scope?.model?.display_name) {
       lines.push(meter(`Week (${limit.scope.model.display_name})`, reading(limit.percent), Date.parse(limit.resets_at), D7));
     }
+  }
+  const cedar = resets?.cedar_ember;
+  const grants = cedar?.eligible === true && Array.isArray(cedar.grants) ? cedar.grants.slice(0, 20) : [];
+  let count = 0;
+  const dates = [];
+  const now = Date.now();
+  for (const grant of grants) {
+    if (grant?.gives_back_weekly !== true || !Number.isFinite(grant.resets_left)) continue;
+    const left = Math.trunc(grant.resets_left);
+    const end = parseTs(grant.ends_at);
+    if (left <= 0 || (Number.isFinite(end) && end < now)) continue;
+    count += left;
+    const date = fmtDay(end);
+    if (date && !dates.includes(date)) dates.push(date);
+  }
+  if (count > 0) {
+    const visible = Math.min(20, count);
+    const overflow = count > visible ? `+${count - visible}` : "";
+    const expiry = dates.length ? ` use by: ${dates.join(", ")}` : "";
+    lines.push(plain("Fable resets", `${"●".repeat(visible)}${overflow}${expiry}`));
+    Object.defineProperty(lines, "bankedResets", { value: { count, dates } });
   }
   if (usage.extra_usage?.credits_ever_enabled) {
     const extra = usage.extra_usage;

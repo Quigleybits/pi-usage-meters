@@ -16,9 +16,9 @@ const safeError = (error) => error instanceof NotConnected ? "not connected"
 export function weeklyUsage(name, lines) {
   const meter = lines.meterRows?.find((row) => row.kind === "weekly");
   if (!Number.isFinite(meter?.pct) || !Number.isFinite(meter.resetMs)) return { name, error: "weekly usage not shown" };
-  const banked = name === "Codex" ? lines.bankedResets : null;
+  const banked = name === "Codex" || name === "Claude" ? lines.bankedResets : null;
   return { name, left: 100 - Math.round(clampPct(meter.pct)), reset: meter.reset.text, reset_s: meter.reset.seconds,
-    banked: banked?.count > 0 ? `${banked.count} banked resets${banked.dates.length ? `, use by ${banked.dates.join(", ")}` : ""}` : null };
+    banked: banked?.count > 0 ? `${banked.count} ${name === "Claude" ? "Fable" : "banked"} resets${banked.dates.length ? `, use by ${banked.dates.join(", ")}` : ""}` : null };
 }
 
 // deadlineMs: the same per-provider deadline as /usage, login lookup included; tests shorten it.
